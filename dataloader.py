@@ -80,11 +80,11 @@ class CC3MDataset(Dataset):
 
     def recover_data(self, saved_file):
         all_data = torch.load(saved_file)
-        self.sources = all_data['sources']
-        self.targets = all_data['targets']
-        self.input_image_path = all_data['input_image_path']
-        self.output_image_path = all_data['output_image_path']
-        self.caption = all_data['caption']
+        self.sources = all_data['sources']  # caption
+        self.targets = all_data['targets']  # [IMG0][IMG1][IMG2][IMG3][IMG4][IMG5][IMG6][IMG7] ###
+        self.input_image_path = all_data['input_image_path']   # [None]
+        self.output_image_path = all_data['output_image_path'] # image path
+        self.caption = all_data['caption']  # caption, the same as sources
         self.task_names = all_data['task_names']
         del all_data
         if self.test:
