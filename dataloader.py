@@ -13,6 +13,7 @@ from pathlib import Path
 import json
 import copy
 from constants import *
+from src.ego_exo4d_dataset import EgoExo4d_Prerain_Dataset 
 
 class CC3MDataset(Dataset):
     def __init__(self, data_path: str, input_processor=None, output_vis_processor=None, test=False):
@@ -422,8 +423,11 @@ class DataCollator(object):
                 output_value = torch.concat(output_value)
             output_dict[key] = output_value
         return output_dict
-
-if 'CC3M' in DATAFOLDER:
+    
+if 'EgoExo4d' in DATAFOLDER:
+    # FIXME: EGO dataset is not ready yet
+    SupervisedDataset = EgoExo4d_Prerain_Dataset
+elif 'CC3M' in DATAFOLDER:
     SupervisedDataset = CC3MDataset
 elif 'MMDialog' in DATAFOLDER:
     SupervisedDataset = MMDialogDataset
