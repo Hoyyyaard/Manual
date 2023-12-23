@@ -76,9 +76,8 @@ class MiniGPT4(Blip2Base):
             layer.output = None
             layer.intermediate = None
         self.load_from_pretrained(url_or_filename=q_former_model)
-        
-        # TODO: Modify Multi-Input Qformer here
 
+        print("freeze_qformer", freeze_qformer)
         if freeze_qformer:
             for name, param in self.Qformer.named_parameters():
                 param.requires_grad = False

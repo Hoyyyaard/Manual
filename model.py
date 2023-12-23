@@ -10,7 +10,7 @@ import torch.nn as nn
 
 from minigpt4.models.mini_gpt5 import MiniGPT5
 from minigpt4.common.config import Config
-
+from src.manual_model import ManualMiniGPT5, ManualArgs
 from diffusers import AutoencoderKL, UNet2DConditionModel
 import wandb
 import torch.nn.functional as F
@@ -65,8 +65,13 @@ class MiniGPT5_Model(LightningModule):
         self.input_vis_processor = None
 
         if encoder_model_config.model_type == 'multimodal_encoder':
-            minigpt4_config = Config(MiniGPT4Args)
-            self.model = MiniGPT5.from_config(minigpt4_config.model_cfg)
+            if encoder_model_config.is_manual:
+                print("Use Manual Minigpt5 Model")
+                manual_config = Config(ManualArgs)
+                self.model = ManualMiniGPT5.from_config(manual_config.model_cfg)
+            else:
+                minigpt4_config = Config(MiniGPT4Args)
+                self.model = MiniGPT5.from_config(minigpt4_config.model_cfg)
             self.tokenizer = self.model.llama_tokenizer
 
             hidden_size = self.model.llama_model.config.hidden_size
@@ -121,7 +126,6 @@ class MiniGPT5_Model(LightningModule):
             #     p.requires_grad = False
             self.t2i_decoder_prompt.requires_grad = False
         
-        # Qformer
 
     def training_step(self, batch, batch_idx):
         for key in batch.keys():

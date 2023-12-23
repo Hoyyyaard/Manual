@@ -34,11 +34,12 @@ class EgoExo4d_Prerain_Dataset(Dataset):
         
         # Suit to Minigpt5 dataset format
         self.test = test
+        self.load_preprocessed_image_features = False
         self.input_processor = input_processor
         self.output_vis_processor = output_vis_processor
         self.output_img_id = input_processor.tokenizer.convert_tokens_to_ids(ALL_IMG_TOKENS[0])
         
-        saved_data_path = os.path.join(self._data_root_dir, 'stage1.pkl')
+        saved_data_path = os.path.join(self._data_root_dir, 'stage1_pretrain_data.pkl')
         if os.path.exists(saved_data_path):
             print("Loading saved data...")
             self.recover_data(saved_data_path)
@@ -69,7 +70,7 @@ class EgoExo4d_Prerain_Dataset(Dataset):
                         if 'cam' in cam:
                             input_image_path.append(os.path.join(take_p, frame, cam))
                         elif 'ego_rgb' in cam:
-                            self.output_image_path.append(os.path.join(take_p, frame, cam))
+                            output_image_path = (os.path.join(take_p, frame, cam))
                         elif 'caption' in cam:
                             with open(os.path.join(take_p, frame, cam), 'r') as f:
                                 data = json.load(f)
@@ -84,21 +85,25 @@ class EgoExo4d_Prerain_Dataset(Dataset):
                     task = data['task']
                     self.task_names.append(f'{take_name}_{frame}_{task}')
                     self.input_image_path.append(input_image_path)
+                    self.output_image_path.append(output_image_path)
                     
-                    # if i%100 == 0 and not test:
-                    #     caption_source = f"###Human: {random.choice(generation_prompts)} {step_caption} ###Assistant:"
-                    #     caption_source = system_prompt + caption_source
-                    #     caption_target = f'{ALL_IMG_TOKENS_STR} ###'
-                    #     self.sources.append(caption_source)
-                    #     self.targets.append(caption_target)
-                    #     self.caption.append(step_caption)
-                    #     self.task_names.append(f'cc3m_{i}_instruction')
-
-                        
+                    if i%100 == 0 and not test:
+                        caption_source = f"###Human: {random.choice(generation_prompts)} {step_caption} ###Assistant:"
+                        caption_source = system_prompt + caption_source
+                        caption_target = f'{ALL_IMG_TOKENS_STR} ###'
+                        self.sources.append(caption_source)
+                        self.targets.append(caption_target)
+                        self.caption.append(step_caption)
+                        self.task_names.append(f'{take_name}_{frame}_{task}_instruction')
+                        self.input_image_path.append(input_image_path)
+                        self.output_image_path.append(output_image_path)
+                    
             self.valid_idx = list(range(len(self.sources)))
             print("Saving data...")
             self.save_process_data(saved_data_path)
             print("Saved data for EgoExo4d!")
+        if test:
+            self.targets = self.caption
         
     def _load_episodes(self):
         epi_save_dir = os.path.join(self._data_root_dir, 'preprocessed_episodes', self._split)
@@ -239,8 +244,25 @@ class EgoExo4d_Prerain_Dataset(Dataset):
                     'task_names': self.task_names,
                     }
         torch.save(all_data, saved_file)
+
+    def recover_data(self, saved_file):
+        all_data = torch.load(saved_file)
+        self.sources = all_data['sources']  # caption
+        self.targets = all_data['targets']  # [IMG0][IMG1][IMG2][IMG3][IMG4][IMG5][IMG6][IMG7] ###
+        self.input_image_path = all_data['input_image_path']   # [None]
+        self.output_image_path = all_data['output_image_path'] # image path
+        self.caption = all_data['caption']  # caption, the same as sources
+        self.task_names = all_data['task_names']
+        del all_data
+        if self.test:
+            self.valid_idx = []
+            for i in range(len(self.targets)):
+                if self.output_image_path[i] is not None:
+                    self.valid_idx.append(i)
                 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
+        if self.test:
+            i = self.valid_idx[i]
         input_image_path = self.input_image_path[i]
         output_image_path = self.output_image_path[i]
         input_text = self.sources[i]
@@ -314,8 +336,23 @@ class EgoExo4d_Prerain_Dataset(Dataset):
         return input_dict
     
     def __len__(self):
-        return len(self.episodes)   
+        if self.test:
+            return len(self.valid_idx)
+        return len(self.sources)  
     
+    @staticmethod
+    def expand2square(pil_img, background_color):
+        width, height = pil_img.size
+        if width == height:
+            return pil_img
+        elif width > height:
+            result = Image.new(pil_img.mode, (width, width), background_color)
+            result.paste(pil_img, (0, (width - height) // 2))
+            return result
+        else:
+            result = Image.new(pil_img.mode, (height, height), background_color)
+            result.paste(pil_img, ((height - width) // 2, 0))
+            return result
     
 if __name__ == '__main__':
     pretrain = EgoExo4d_Prerain_Dataset(split='val', preprocess=True)

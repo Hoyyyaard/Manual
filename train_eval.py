@@ -41,6 +41,7 @@ class ModelArguments:
     snr_loss: Optional[bool] = field(default=True)
     model_save_name: Optional[str] = field(default="model_{epoch}-{step}")
     stage1_weight: Optional[str] = field(default=None)
+    is_manual: Optional[bool] = field(default=False)
 
 @dataclass
 class DataArguments:
@@ -160,7 +161,7 @@ if __name__ == "__main__":
             )
         
         strategy = 'ddp'
-        if "CC3M" in DATAFOLDER:
+        if "CC3M" in DATAFOLDER or 'EgoExo4d' in DATAFOLDER:
             val_check_interval = 0.25
         else:
             val_check_interval = 0.5
