@@ -10,7 +10,6 @@ import torch.nn as nn
 
 from minigpt4.models.mini_gpt5 import MiniGPT5
 from minigpt4.common.config import Config
-from src.manual_model import ManualMiniGPT5, ManualArgs
 from diffusers import AutoencoderKL, UNet2DConditionModel
 import wandb
 import torch.nn.functional as F
@@ -60,18 +59,18 @@ class MiniGPT5_Model(LightningModule):
         **kwargs,
     ):
         super().__init__()
+        # FIXME: It will cause no hyparparameters found error to LightningModule
+        # if only run LightningModule.__init__(self) in src.manual_model.Manual_MiniGPT5_Model
+        # so I have to run super().__init__() in src.manual_model.Manual_MiniGPT5_Model
+        if IS_MANUAL:
+            return
         self.save_hyperparameters(ignore=['encoder_model_config'])
         self.encoder_model_config = encoder_model_config
         self.input_vis_processor = None
 
         if encoder_model_config.model_type == 'multimodal_encoder':
-            if encoder_model_config.is_manual:
-                print("Use Manual Minigpt5 Model")
-                manual_config = Config(ManualArgs)
-                self.model = ManualMiniGPT5.from_config(manual_config.model_cfg)
-            else:
-                minigpt4_config = Config(MiniGPT4Args)
-                self.model = MiniGPT5.from_config(minigpt4_config.model_cfg)
+            minigpt4_config = Config(MiniGPT4Args)
+            self.model = MiniGPT5.from_config(minigpt4_config.model_cfg)
             self.tokenizer = self.model.llama_tokenizer
 
             hidden_size = self.model.llama_model.config.hidden_size
@@ -151,7 +150,7 @@ class MiniGPT5_Model(LightningModule):
         log_dict = {f'train_{k}': v for k, v in loss_dict.items()}
         self.log_dict(log_dict, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=bs)
         # check image generation for every 1000 steps
-        if (self.global_step+1) % 500 == 0 and self.global_rank == 0:
+        if (self.global_step+1) % self.encoder_model_config.check_generate_step == 0 and self.global_rank == 0:
             with torch.no_grad():
                 self.eval()
                 # utterance = "generate image with caption: a man on the sofa."
@@ -253,7 +252,7 @@ class MiniGPT5_Model(LightningModule):
     
     def forward(self, input_ids, attention_mask, input_images, output_image, labels, captions=None, input_images_feature=None, output_image_feature=None):
         if self.encoder_model_config.model_type=='multimodal_encoder':
-            outputs, special_token_index = self.model(input_ids=input_ids, labels=labels, attention_mask=attention_mask, input_images=input_images, input_img_features=input_images_feature ,output_hidden_states=True)
+            outputs, special_token_index = self.model(input_ids=input_ids, labels=labels, attention_mask=attention_mask, input_images=input_images, input_img_features=input_images_feature ,output_hidden_states=True, captions=captions)
         text_loss = outputs['loss']
         last_hidden_state = outputs['hidden_states'][-1]  # [bs, 32, 4096]
         t2i_input_embedding = []

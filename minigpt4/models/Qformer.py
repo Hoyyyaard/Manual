@@ -865,7 +865,7 @@ class BertModel(BertPreTrainedModel):
 
         query_length = query_embeds.shape[1] if query_embeds is not None else 0
 
-        embedding_output = self.embeddings(
+        embedding_output = self.embeddings(              # [bs, 32+instruction_length, 768]
             input_ids=input_ids,
             position_ids=position_ids,
             query_embeds=query_embeds,

@@ -19,6 +19,8 @@ from constants import *
 from lightning.pytorch.callbacks import BasePredictionWriter
 from model import MiniGPT5_Model, MiniGPT5_InputProcessor
 from metric import *
+from src.manual_model import Manual_MiniGPT5_Model
+
 
 class PredWriter(BasePredictionWriter):
     def write_on_epoch_end(
@@ -41,7 +43,7 @@ class ModelArguments:
     snr_loss: Optional[bool] = field(default=True)
     model_save_name: Optional[str] = field(default="model_{epoch}-{step}")
     stage1_weight: Optional[str] = field(default=None)
-    is_manual: Optional[bool] = field(default=False)
+    check_generate_step: Optional[int] = field(default=50)
 
 @dataclass
 class DataArguments:
@@ -101,6 +103,7 @@ if __name__ == "__main__":
     torch.backends.cuda.matmul.allow_tf32 = True
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    os.makedirs(training_args.output_dir, exist_ok=True)
     if isinstance(training_args.gpus, str):
         training_args.gpus = [int(x) for x in training_args.gpus.split(',')]
     if isinstance(data_args.train_data_path, str):
@@ -115,13 +118,18 @@ if __name__ == "__main__":
     num_devices = len(devices)
     gradient_accumulation_steps = max(1,batch_size // (training_args.per_device_train_batch_size*num_devices))
 
-    if IS_STAGE2:
+    # Chosse LightningModule
+    LightningModel = Manual_MiniGPT5_Model if IS_MANUAL else MiniGPT5_Model
+    
+    # Manual Model copy pretrain weight from minigpt5 stage1
+    if IS_STAGE2 or IS_MANUAL:
+        print('Load stage1 weight')
         stage1_weight = model_args.stage1_weight
         assert stage1_weight is not None, "stage2 weight needs stage1 weight, but stage1 weight path is None"
         stage1_weight = os.path.join(WEIGHTFOLDER, stage1_weight)
-        model = MiniGPT5_Model.load_from_checkpoint(stage1_weight, strict=False, map_location="cpu", encoder_model_config=model_args, **vars(training_args))
+        model = LightningModel.load_from_checkpoint(stage1_weight, strict=False, map_location="cpu", encoder_model_config=model_args, **vars(training_args))
     else:
-        model = MiniGPT5_Model(encoder_model_config=model_args, **vars(training_args))
+        model = LightningModel(encoder_model_config=model_args, **vars(training_args))
     
     tokenizer = model.tokenizer
     sd_tokenizer = model.sd_tokenizer
@@ -161,13 +169,16 @@ if __name__ == "__main__":
             )
         
         strategy = 'ddp'
-        if "CC3M" in DATAFOLDER or 'EgoExo4d' in DATAFOLDER:
+        if "CC3M" in DATAFOLDER :
             val_check_interval = 0.25
+        elif 'EgoExo4d' in DATAFOLDER:
+            val_check_interval = 0.25
+            strategy = 'ddp_find_unused_parameters_true'
         else:
             val_check_interval = 0.5
             strategy = 'ddp_find_unused_parameters_true'
 
-        wandb_logger = WandbLogger(save_dir=training_args.output_dir, project="MiniGPT5_Model", offline=False, name=model_args.model_save_name)
+        wandb_logger = WandbLogger(save_dir=training_args.output_dir, project=f"Manual_Model", offline=False, name=model_args.model_save_name)
         trainer = Trainer(default_root_dir=training_args.output_dir, max_epochs=training_args.num_train_epochs, 
                         accumulate_grad_batches=gradient_accumulation_steps,
                         accelerator="gpu", devices=devices, 
@@ -177,7 +188,10 @@ if __name__ == "__main__":
                         val_check_interval=val_check_interval,
                         callbacks=[checkpoint_callback])
         resume = training_args.resume
-        trainer.fit(model, train_dataloader, val_dataloader, ckpt_path=resume)
+        if ONLY_TRAIN:
+            trainer.fit(model, train_dataloader, ckpt_path=resume)
+        else:
+            trainer.fit(model, train_dataloader, val_dataloader, ckpt_path=resume)
     else:
         model.image_pipeline.enable_xformers_memory_efficient_attention()
         output_vis_processor = transforms.Compose(
@@ -202,7 +216,7 @@ if __name__ == "__main__":
 
         pred_writer = PredWriter(write_interval="epoch")
 
-        wandb_logger = WandbLogger(save_dir=training_args.output_dir, project="MiniGPT5_Model", offline=True, name=model_args.model_save_name)
+        wandb_logger = WandbLogger(save_dir=training_args.output_dir, project=f"Manual_Model", offline=True, name=model_args.model_save_name)
         trainer = Trainer(default_root_dir=training_args.output_dir, max_epochs=training_args.num_train_epochs, 
                         accelerator="gpu", devices=devices, 
                         strategy='ddp', 

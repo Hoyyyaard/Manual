@@ -23,6 +23,7 @@ class EgoExo4d_Prerain_Dataset(Dataset):
         self._data_root_dir = data_path
         self._split = split
         self._cooking_only = cooking_only
+        self.image_placehold = '<Img><ImageHere></Img>'
         
         if preprocess:
             self._load_neccesary_data()
@@ -77,7 +78,9 @@ class EgoExo4d_Prerain_Dataset(Dataset):
                                 step_caption = data['caption']
 
                     step_caption = self.pre_caption(step_caption)
-                    caption_source = f"{step_caption}"
+                    # this_take_image_placehold = '<Img>' + self.image_placehold*len(input_image_path) + '</Img>'
+                    this_take_image_placehold = self.image_placehold*len(input_image_path)
+                    caption_source = f"{this_take_image_placehold}{step_caption}"
                     caption_target = f'{ALL_IMG_TOKENS_STR} ###'
                     self.sources.append(caption_source)
                     self.targets.append(caption_target)
