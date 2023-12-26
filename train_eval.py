@@ -55,7 +55,7 @@ class DataArguments:
 class TrainingArguments:
     cache_dir: Optional[str] = field(default=None)
     output_dir: str = field(default='results')
-    num_train_epochs:int = field(default=2)
+    num_train_epochs:int = field(default=30)
     per_device_train_batch_size:int = field(default=2)
     per_device_eval_batch_size:int = field(default=2)
     real_batch_size:int = field(default=48)

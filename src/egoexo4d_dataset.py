@@ -7,15 +7,153 @@ from typing import Optional, Dict, Sequence
 from pathlib import Path
 import imageio
 from PIL import Image
+import sys
+sys.path.append('/project/pi_chuangg_umass_edu/chenpeihao/Projects/hongyanzhi/MiniGPT-5/')
 from constants import *
 import random
 import numpy as np
 import re
+import clip
 
+
+class EgoExo4d_Finetune_Dataset(Dataset):
+    def __init__(self, split='val', data_path='datasets/EgoExo4d', cooking_only=True, preprocess=False, input_processor=None, output_vis_processor=None, test=False) -> None:
+        self.episodes = []
+        self._data_root_dir = data_path
+        self._split = split
+        self._cooking_only = cooking_only
+        self.image_placehold = '<Img><ImageHere></Img>'
+        
+        if preprocess:
+            self._device = "cuda" 
+            self.model, self.preprocess = clip.load("ViT-B/32", device=self._device)
+            self._load_neccesary_data()
+            print('INFO: [ Preprocess episodes and save ]')
+            self._preprocess_episodes_and_save()
+            
+    def _load_neccesary_data(self):
+        with open(os.path.join(self._data_root_dir, 'takes.json'), 'r') as f:
+            takes = json.load(f)
+            self.taskname_uid = {}
+            self.take_task = {}
+            for tak in takes:
+                self.taskname_uid[tak['take_name']] = tak['take_uid']
+                self.take_task[tak['take_name']] = tak['task_name']
+
+        with open(os.path.join(self._data_root_dir, 'annotations', f'keystep_{self._split}.json'), 'r') as f:
+            key_frame_annotations_raw = json.load(f)['annotations']
+            self.key_frame_annotations = {}
+            for _,v in key_frame_annotations_raw.items():
+                self.key_frame_annotations[v['take_uid']] = {
+                    "take_name": v['take_name'],
+                    # filter out non-essential segments
+                    "key_frames" : [seg for seg in v['segments'] if seg['is_essential']]
+                }
+                
+                
+    def _preprocess_episodes_and_save(self):
+        SAMPLE_FRAME_NUM_PER_SECOND = 2
+        
+        epi_save_dir = os.path.join(self._data_root_dir, 'preprocessed_episodes_finetune', self._split)
+        total_takes = os.listdir(os.path.join(self._data_root_dir, 'takes')).sort()
+        for take_name in tqdm(total_takes, desc='Loading takes'):
+            if self._cooking_only and 'cooking' not in take_name:
+                continue
+            take_p = os.path.join(self._data_root_dir, 'takes', take_name)
+            tak_save_dir = os.path.join(epi_save_dir, take_name)
+            take_task = self.take_task[take_name]
+            if os.path.exists(tak_save_dir):
+                continue
+            # os.makedirs(tak_save_dir, exist_ok=True)
+            
+            # Load video captures
+            frame_aligned_videos_p = os.path.join(take_p, 'frame_aligned_videos')
+            ## Filter slam left/right and et mp4
+            filters = ['aria01_211-1.mp4', 'aria01_1201-1.mp4', 'aria01_1201-2.mp4']
+            video_captures = {}
+            for mp4 in os.listdir(frame_aligned_videos_p):
+                if mp4 in filters:
+                    continue
+                mp4_p = os.path.join(frame_aligned_videos_p, mp4)
+                video_name = mp4.split('.')[0] if not 'aria' in mp4 else 'ego_rgb'
+                # Cv2 capture or imageio reader
+                video_captures.update({video_name: cv2.VideoCapture(mp4_p)})
+                # video_captures.update({video_name: imageio.get_reader(mp4_p,'ffmpeg')})
+                
+            epi = {}
+            epi['exocentric_images'] = []
+            epi['egocentric_images'] = []
+            epi['captions'] = []
+            # Sample exo-centirc images only one time
+            for k,v in video_captures.items():
+                if 'ego' in k:
+                    continue
+                v.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ret, frame = v.read()
+                assert ret
+                epi['exocentric_images'].append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))) 
+                
+            # Load pretrain data : narrations and exocentric images
+            if not self.taskname_uid[take_name] in self.key_frame_annotations:
+                continue
+            key_frame_annotations = self.key_frame_annotations[self.taskname_uid[take_name]]['key_frames']
+            for anno in tqdm(key_frame_annotations,desc='Loading episode within a take'):
+                ego_video_capture = video_captures['ego_rgb']
+                images = []
+                text = anno['step_description']
+                FPS = ego_video_capture.get(cv2.CAP_PROP_FPS)
+                delta_time = int(anno['end_time'] - anno['start_time'])
+                sample_interval_to_frame = int(delta_time * SAMPLE_FRAME_NUM_PER_SECOND)    
+                for fra in range(int(FPS*anno['start_time']), int(FPS*anno['end_time']), sample_interval_to_frame):
+                    ego_video_capture.set(cv2.CAP_PROP_POS_FRAMES, fra)
+                    ret, frame = ego_video_capture.read()
+                    assert ret
+                    images.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+                    
+                # Do clip similar selection
+                c_images = [self.preprocess(img) for img in images]
+                c_images = torch.stack(c_images).to(self._device)
+                c_text = clip.tokenize(text).to(self._device)
+                with torch.no_grad():
+                    logits_per_image, logits_per_text = self.model(c_images, c_text)
+                    probs = logits_per_text.softmax(dim=-1).cpu().numpy()
+                    meaningful_image = images[probs.argmax()]
+                epi['egocentric_images'].append(meaningful_image)
+                epi['captions'].append(text)
+            
+            for _, cap in video_captures.items():
+                cap.release()
+            
+            ego_sp = os.path.join(tak_save_dir, 'egocentric_images')
+            os.makedirs(ego_sp, exist_ok=True)
+            for imgi in range(len(epi['egocentric_images'])):
+                epi['egocentric_images'][imgi].save(os.path.join(ego_sp, f'{imgi}.png'))
+            exo_sp = os.path.join(tak_save_dir, 'exocentric_images')
+            os.makedirs(exo_sp, exist_ok=True)
+            for imgi in range(len(epi['exocentric_images'])):
+                epi['exocentric_images'][imgi].save(os.path.join(exo_sp, f'{imgi}.png'))
+            with open(os.path.join(tak_save_dir, 'caption.json'), 'w') as f:
+                json.dump({'task':take_task,'captions':epi['captions']}, f)
+        
+    
 class EgoExo4d_Prerain_Dataset(Dataset):
     '''
         Each episode is a pairs of action description and 
         corresponding exocentric views of a take.
+        
+        Dataset Structure:
+            - dataset_root_dir
+                - split
+                    - take_name
+                        - frame_number
+                            - caption.json
+                                - task
+                                - caption
+                            - cam01.png
+                            - cam02.png
+                            - cam03.png
+                            - cam04.png
+                            - ego_rgb.png
     '''
     
     def __init__(self, split='val', data_path='datasets/EgoExo4d', cooking_only=True, preprocess=False, input_processor=None, output_vis_processor=None, test=False) -> None:
@@ -358,6 +496,7 @@ class EgoExo4d_Prerain_Dataset(Dataset):
             return result
     
 if __name__ == '__main__':
-    pretrain = EgoExo4d_Prerain_Dataset(split='val', preprocess=True)
+    # pretrain = EgoExo4d_Prerain_Dataset(split='val', preprocess=True)
+    finetune = EgoExo4d_Finetune_Dataset(split='val', preprocess=True)
     
     
