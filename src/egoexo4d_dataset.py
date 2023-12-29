@@ -14,6 +14,18 @@ import random
 import numpy as np
 import re
 import clip
+import argparse
+
+def parse_args():
+    parser = argparse.ArgumentParser(description='Preprocess EgoExo4d dataset')
+    parser.add_argument('--data_path', type=str, default='datasets/EgoExo4d', help='Path to the dataset')
+    parser.add_argument('--split', type=str, default='val', choices=['train', 'val', 'test'], help='Split of the dataset')
+    parser.add_argument('--cooking_only', action='store_true', help='Only use cooking tasks')
+    parser.add_argument('--preprocess', action='store_true', help='Preprocess dataset')
+    parser.add_argument('--chunk', type=int, required=True, help='Chunk size for preprocessed dataset')
+    parser.add_argument('--chunk_idx', type=int, required=True, help='Chunk index for preprocessed dataset')
+    args = parser.parse_args()
+    return args
 
 
 class EgoExo4d_Finetune_Dataset(Dataset):
@@ -52,7 +64,7 @@ class EgoExo4d_Finetune_Dataset(Dataset):
                 
                 
     def _preprocess_episodes_and_save(self):
-        SAMPLE_FRAME_NUM_PER_SECOND = 2
+        SAMPLE_FRAME_NUM_PER_SECOND = 10
         
         epi_save_dir = os.path.join(self._data_root_dir, 'preprocessed_episodes_finetune', self._split)
         total_takes = os.listdir(os.path.join(self._data_root_dir, 'takes'))
@@ -105,7 +117,8 @@ class EgoExo4d_Finetune_Dataset(Dataset):
                 text = anno['step_description']
                 FPS = ego_video_capture.get(cv2.CAP_PROP_FPS)
                 delta_time = int(anno['end_time'] - anno['start_time'])
-                sample_interval_to_frame = int(delta_time * SAMPLE_FRAME_NUM_PER_SECOND)    
+                sample_total_frame = int(delta_time * SAMPLE_FRAME_NUM_PER_SECOND)  
+                sample_interval_to_frame = int((delta_time * FPS) / sample_total_frame)
                 for fra in range(int(FPS*anno['start_time']), int(FPS*anno['end_time']), sample_interval_to_frame):
                     ego_video_capture.set(cv2.CAP_PROP_POS_FRAMES, fra)
                     ret, frame = ego_video_capture.read()
@@ -499,6 +512,7 @@ class EgoExo4d_Prerain_Dataset(Dataset):
     
 if __name__ == '__main__':
     # pretrain = EgoExo4d_Prerain_Dataset(split='val', preprocess=True)
-    finetune = EgoExo4d_Finetune_Dataset(split='val', preprocess=True)
+    args = parse_args()
+    finetune = EgoExo4d_Finetune_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx)
     
     
