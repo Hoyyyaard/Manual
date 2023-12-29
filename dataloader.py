@@ -13,7 +13,7 @@ from pathlib import Path
 import json
 import copy
 from constants import *
-from egoexo4d_dataset import EgoExo4d_Prerain_Dataset 
+from src.egoexo4d_dataset import EgoExo4d_Prerain_Dataset 
 
 class CC3MDataset(Dataset):
     def __init__(self, data_path: str, input_processor=None, output_vis_processor=None, test=False):

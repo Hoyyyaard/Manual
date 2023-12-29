@@ -55,7 +55,8 @@ class EgoExo4d_Finetune_Dataset(Dataset):
         SAMPLE_FRAME_NUM_PER_SECOND = 2
         
         epi_save_dir = os.path.join(self._data_root_dir, 'preprocessed_episodes_finetune', self._split)
-        total_takes = os.listdir(os.path.join(self._data_root_dir, 'takes')).sort()
+        total_takes = os.listdir(os.path.join(self._data_root_dir, 'takes'))
+        total_takes.sort()
         for take_name in tqdm(total_takes, desc='Loading takes'):
             if self._cooking_only and 'cooking' not in take_name:
                 continue
@@ -88,7 +89,8 @@ class EgoExo4d_Finetune_Dataset(Dataset):
             for k,v in video_captures.items():
                 if 'ego' in k:
                     continue
-                v.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                # 100 to avoid some shelter from first few frames
+                v.set(cv2.CAP_PROP_POS_FRAMES, 100)
                 ret, frame = v.read()
                 assert ret
                 epi['exocentric_images'].append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))) 

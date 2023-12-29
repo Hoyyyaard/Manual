@@ -140,6 +140,8 @@ class ManualMiniGPT5(MiniGPT5):
                 encoder_attention_mask=image_atts,
                 return_dict=True,
             )
+            # Use only query output
+            query_outputs.last_hidden_state = query_outputs.last_hidden_state[:, :query_tokens.shape[1], :]
             
             '''
             [bs, 32+len(tokens(instr)) * view_num, 768] 
