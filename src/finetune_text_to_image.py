@@ -12,7 +12,7 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
-
+from PIL import Image
 import argparse
 import logging
 import math
@@ -46,7 +46,7 @@ from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel, compute_snr
 from diffusers.utils import check_min_version, deprecate, is_wandb_available, make_image_grid
 from diffusers.utils.import_utils import is_xformers_available
-
+from egoexo4d_dataset import Diffusion_Finetune_Dataset
 
 if is_wandb_available():
     import wandb
@@ -137,7 +137,7 @@ More information on all the CLI arguments and the environment are available on y
         f.write(yaml + model_card)
 
 
-def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, epoch):
+def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, epoch, val_batch=None):
     logger.info("Running validation... ")
 
     pipeline = StableDiffusionPipeline.from_pretrained(
@@ -163,12 +163,23 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
 
     images = []
-    for i in range(len(args.validation_prompts)):
-        with torch.autocast("cuda"):
-            image = pipeline(args.validation_prompts[i], num_inference_steps=20, generator=generator).images[0]
-
-        images.append(image)
-
+    if val_batch is None:
+        for i in range(len(args.validation_prompts)):
+            with torch.autocast("cuda"):
+                image = pipeline(args.validation_prompts[i], num_inference_steps=20, generator=generator).images[0]
+            images.append(image)
+    else:
+        args.validation_prompts = []
+        for gt_image, text in zip(val_batch['image'], val_batch['text']):
+            with torch.autocast("cuda"):
+                image = pipeline(text, num_inference_steps=20, generator=generator).images[0]
+                gt_image = gt_image.resize(image.size)
+                h_concat = Image.new('RGB', (image.width * 2, image.height))
+                h_concat.paste(gt_image, (0, 0))
+                h_concat.paste(image, (image.width, 0))
+                images.append(h_concat)
+                args.validation_prompts.append(text)
+                
     for tracker in accelerator.trackers:
         if tracker.name == "tensorboard":
             np_images = np.stack([np.asarray(img) for img in images])
@@ -772,8 +783,20 @@ def main():
         pixel_values = torch.stack([example["pixel_values"] for example in examples])
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
         input_ids = torch.stack([example["input_ids"] for example in examples])
-        return {"pixel_values": pixel_values, "input_ids": input_ids}
+        text = [example['text'] for example in examples]
+        image = [example['image'] for example in examples]
+        return {"pixel_values": pixel_values, "input_ids": input_ids, 'image':image, 'text':text}
 
+    # Final dataset in format of {"pixel_values", "input_ids", "text", "image"}
+    def tokenize_captions(text):
+        inputs = tokenizer(
+            [text], max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
+        )
+        return inputs.input_ids[0]
+    def preprocess_func(image, text):
+        return train_transforms(image), tokenize_captions(text)
+    train_dataset = Diffusion_Finetune_Dataset(preprocess_func=preprocess_func)
+    
     # DataLoaders creation:
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -1002,7 +1025,8 @@ def main():
                 break
 
         if accelerator.is_main_process:
-            if args.validation_prompts is not None and epoch % args.validation_epochs == 0:
+            # if args.validation_prompts is not None and epoch % args.validation_epochs == 0:
+            if epoch % args.validation_epochs == 0:
                 if args.use_ema:
                     # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
                     ema_unet.store(unet.parameters())
@@ -1016,6 +1040,7 @@ def main():
                     accelerator,
                     weight_dtype,
                     global_step,
+                    val_batch=batch
                 )
                 if args.use_ema:
                     # Switch back to the original UNet parameters.

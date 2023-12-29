@@ -15,26 +15,142 @@ import numpy as np
 import re
 import clip
 import argparse
+import math
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Preprocess EgoExo4d dataset')
     parser.add_argument('--data_path', type=str, default='datasets/EgoExo4d', help='Path to the dataset')
     parser.add_argument('--split', type=str, default='val', choices=['train', 'val', 'test'], help='Split of the dataset')
     parser.add_argument('--cooking_only', action='store_true', help='Only use cooking tasks')
-    parser.add_argument('--preprocess', action='store_true', help='Preprocess dataset')
-    parser.add_argument('--chunk', type=int, required=True, help='Chunk size for preprocessed dataset')
-    parser.add_argument('--chunk_idx', type=int, required=True, help='Chunk index for preprocessed dataset')
+    parser.add_argument('--preprocess', default=True, action='store_true', help='Preprocess dataset')
+    parser.add_argument('--chunk', type=int, default=1, help='Chunk size for preprocessed dataset')
+    parser.add_argument('--chunk_idx', type=int, default=0, help='Chunk index for preprocessed dataset')
     args = parser.parse_args()
     return args
 
+class Diffusion_Finetune_Dataset(Dataset):
+    '''
+        This dataset will leverage different preprocessed dataset:
+            1. EgoExo4d_Finetune_Dataset
+    '''
+    def __init__(self, split='val', preprocess_func=None):
+        self._dataset_path = os.path.join('datasets', 'EgoExo4d', 'preprocessed_episodes_finetune', split)
+        self.preprocess_func = preprocess_func
+        self.episodes = []
+        
+        self.load_from_EgoExo4d_Finetune_Dataset()
+        
+    def load_from_EgoExo4d_Finetune_Dataset(self, ):
+        # Each episode will be in format {'image_path', 'caption'}
+        for task_name in tqdm(os.listdir(self._dataset_path), desc='Loading EgoExo4d_Finetune_Dataset'):
+            take_path = os.path.join(self._dataset_path, task_name)
+            with open(os.path.join(take_path, 'caption.json'), 'r') as f:
+                data = json.load(f)
+                captions = data['captions'] 
+            image_paths = os.listdir(os.path.join(take_path, 'egocentric_images'))
+            assert len(captions) == len(image_paths)
+            image_paths = [os.path.join(os.path.join(take_path, 'egocentric_images'), p) for p in image_paths]
+            for pa, ca in zip(image_paths, captions):
+                self.episodes.append({'image_path':pa, 'caption':ca})
+    
+    def __getitem__(self, i):
+        image_p, text = self.episodes[i]['image_path'], self.episodes[i]['caption']
+        image = Image.open(image_p).convert("RGB")
+        pixel_values, input_ids = self.preprocess_func(image, text)
+        
+        return {'pixel_values':pixel_values, 
+                'input_ids':input_ids,
+                'image':image,
+                'text':text}
+        
+    def __len__(self):
+        return len(self.episodes)   
+        
+            
+def fisheye_camera_longitude_latitude_correction(im: Image):
+    
+    width, high = im.size
+    sqrt_len = min(width, high)
+    im = im.transform((sqrt_len, sqrt_len),
+                        Image.EXTENT,
+                        ((width-sqrt_len)/2, (high-sqrt_len)/2, 
+                        sqrt_len+(width-sqrt_len)/2, sqrt_len+(high-sqrt_len)/2)
+                        )
+    width = high = sqrt_len
+    
+    idata = im.getdata()
+    odata = []
+    
+    alpha = math.pi/2
+    
+    out_high = round(high * math.tan(alpha/2))
+    out_width = round(width * math.tan(alpha/2))
+    out_radius = round(high * math.tan(alpha/2))
+    out_center_x = out_width / 2
+    out_center_y = out_high / 2
+    
+    out_bl_x = 0
+    out_br_x = out_width - 1
+    out_bt_y = 0
+    out_bb_y = out_high - 1
+    
+    out_bl_cx = out_bl_x - out_center_x
+    out_br_cx = out_br_x - out_center_x
+    out_bt_cy = out_bt_y - out_center_y
+    out_bb_cy = out_bb_y - out_center_y
+    
+    src_radius = round(high * math.sin(alpha/2))
+    src_center_x = width / 2
+    src_center_y = high / 2
+    
+    for i in range(0, high * width):
+        ox = math.floor(i / out_width)
+        oy = i % out_high
+        
+        cx = ox - out_center_x
+        cy = oy - out_center_y
+        
+        out_distance = round(math.sqrt(pow(cx, 2) + pow(cy, 2)))
+        theta = math.atan2(cy, cx)
+        if (-math.pi/4 <= theta <= math.pi/4):
+            bx = out_radius * math.cos(math.pi/4)
+            by = bx * math.tan(theta)
+        elif (math.pi/4 <= theta <= math.pi*3/4):
+            by = out_radius * math.sin(math.pi/4)
+            bx = by / math.tan(theta)
+        elif (-math.pi*3/4 <= theta <= -math.pi/4):
+            by = out_radius * math.sin(-math.pi/4)
+            bx = by / math.tan(theta)
+        else:
+            bx = out_radius * math.cos(-math.pi*3/4)
+            by = bx * math.tan(theta)
+            
+        bdy_distance = round(math.sqrt(pow(cx, 2) + pow(cy, 2)))
+        src_distance = src_radius * bdy_distance / out_radius
+            
+        src_x = round(src_center_x + math.cos(theta) * src_distance)
+        src_y = round(src_center_y + math.sin(theta) * src_distance)
+        
+        src_idx = src_x*width + src_y    
+        if(0 < src_idx < high*width):
+            odata.append(idata[src_idx])
+        else:
+            odata.append((0,0,0))
+    
+    om = Image.new("RGB", (high, width))
+    om.putdata(odata)
+    
+    return om
 
 class EgoExo4d_Finetune_Dataset(Dataset):
-    def __init__(self, split='val', data_path='datasets/EgoExo4d', cooking_only=True, preprocess=False, input_processor=None, output_vis_processor=None, test=False) -> None:
+    def __init__(self, split='val', data_path='datasets/EgoExo4d', cooking_only=True, preprocess=False, input_processor=None, output_vis_processor=None, test=False, chunk=None, chunk_idx=None) -> None:
         self.episodes = []
         self._data_root_dir = data_path
         self._split = split
         self._cooking_only = cooking_only
         self.image_placehold = '<Img><ImageHere></Img>'
+        self._chunk = chunk
+        self._chunk_idx = chunk_idx
         
         if preprocess:
             self._device = "cuda" 
@@ -69,6 +185,10 @@ class EgoExo4d_Finetune_Dataset(Dataset):
         epi_save_dir = os.path.join(self._data_root_dir, 'preprocessed_episodes_finetune', self._split)
         total_takes = os.listdir(os.path.join(self._data_root_dir, 'takes'))
         total_takes.sort()
+        tasks_num_per_chunk = math.ceil(len(total_takes)/self._chunk)
+        total_takes = total_takes[self._chunk_idx*tasks_num_per_chunk:(self._chunk_idx+1)*tasks_num_per_chunk]
+        print(f'INFO: [ Chunk num: {self._chunk}, Chunk idx: {self._chunk_idx}, Process tasks num from {self._chunk_idx*tasks_num_per_chunk} to {(self._chunk_idx+1)*tasks_num_per_chunk} ]')
+        
         for take_name in tqdm(total_takes, desc='Loading takes'):
             if self._cooking_only and 'cooking' not in take_name:
                 continue
@@ -115,15 +235,20 @@ class EgoExo4d_Finetune_Dataset(Dataset):
                 ego_video_capture = video_captures['ego_rgb']
                 images = []
                 text = anno['step_description']
+                
+                # There will be caption duplication in one take
+                if text in epi['captions']:
+                    continue
+                
                 FPS = ego_video_capture.get(cv2.CAP_PROP_FPS)
-                delta_time = int(anno['end_time'] - anno['start_time'])
+                delta_time = math.ceil(anno['end_time'] - anno['start_time'])
                 sample_total_frame = int(delta_time * SAMPLE_FRAME_NUM_PER_SECOND)  
                 sample_interval_to_frame = int((delta_time * FPS) / sample_total_frame)
                 for fra in range(int(FPS*anno['start_time']), int(FPS*anno['end_time']), sample_interval_to_frame):
                     ego_video_capture.set(cv2.CAP_PROP_POS_FRAMES, fra)
                     ret, frame = ego_video_capture.read()
                     assert ret
-                    images.append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+                    images.append((Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))))
                     
                 # Do clip similar selection
                 c_images = [self.preprocess(img) for img in images]
