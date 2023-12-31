@@ -8,23 +8,27 @@ from pathlib import Path
 import imageio
 from PIL import Image
 import sys
-sys.path.append('/project/pi_chuangg_umass_edu/chenpeihao/Projects/hongyanzhi/MiniGPT-5/')
+sys.path.append('../')
 from constants import *
 import random
 import numpy as np
 import re
+import pandas as pd
 import clip
 import argparse
+from decord import VideoReader
+from decord import cpu, gpu
 import math
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Preprocess EgoExo4d dataset')
     parser.add_argument('--data_path', type=str, default='datasets/EgoExo4d', help='Path to the dataset')
-    parser.add_argument('--split', type=str, default='val', choices=['train', 'val', 'test'], help='Split of the dataset')
+    parser.add_argument('--split', type=str, default='train', choices=['train', 'val', 'test'], help='Split of the dataset')
     parser.add_argument('--cooking_only', action='store_true', help='Only use cooking tasks')
-    parser.add_argument('--preprocess', default=True, action='store_true', help='Preprocess dataset')
+    parser.add_argument('--preprocess', action='store_true', help='Preprocess dataset')
     parser.add_argument('--chunk', type=int, default=1, help='Chunk size for preprocessed dataset')
     parser.add_argument('--chunk_idx', type=int, default=0, help='Chunk index for preprocessed dataset')
+    parser.add_argument('--filter_frame',action='store_true', help='Use clip to filter frames')
     args = parser.parse_args()
     return args
 
@@ -33,16 +37,22 @@ class Diffusion_Finetune_Dataset(Dataset):
         This dataset will leverage different preprocessed dataset:
             1. EgoExo4d_Finetune_Dataset
     '''
-    def __init__(self, split='val', preprocess_func=None):
-        self._dataset_path = os.path.join('datasets', 'EgoExo4d', 'preprocessed_episodes_finetune', split)
+    def __init__(self, split='val', preprocess_func=None, dataset_list= ['epic']):
+        self.EgoExo4d_Finetune_dataset_path = os.path.join('datasets', 'EgoExo4d', 'preprocessed_episodes_finetune', split)
+        self.Epic_Kitchen_Text_Image_Pairs_dataset_path = os.path.join('datasets', 'epic-kitchen', 'text_image_pairs', split)
         self.preprocess_func = preprocess_func
         self.episodes = []
         
-        self.load_from_EgoExo4d_Finetune_Dataset()
+        if 'egoexo' in dataset_list:
+            print("Loading EgoExo4d_Finetune_Dataset..")
+            self.load_from_EgoExo4d_Finetune_Dataset()
+        if 'epic' in dataset_list:
+            print("Loading Epic_Kitchen_Text_Image_Pairs_Dataset..")
+            self.load_from_Epic_Kitchen_Text_Image_Pairs_Dataset()
         
     def load_from_EgoExo4d_Finetune_Dataset(self, ):
         # Each episode will be in format {'image_path', 'caption'}
-        for task_name in tqdm(os.listdir(self._dataset_path), desc='Loading EgoExo4d_Finetune_Dataset'):
+        for task_name in tqdm(os.listdir(self.EgoExo4d_Finetune_dataset_path), desc='Loading EgoExo4d_Finetune_Dataset'):
             take_path = os.path.join(self._dataset_path, task_name)
             with open(os.path.join(take_path, 'caption.json'), 'r') as f:
                 data = json.load(f)
@@ -52,6 +62,15 @@ class Diffusion_Finetune_Dataset(Dataset):
             image_paths = [os.path.join(os.path.join(take_path, 'egocentric_images'), p) for p in image_paths]
             for pa, ca in zip(image_paths, captions):
                 self.episodes.append({'image_path':pa, 'caption':ca})
+                
+    def load_from_Epic_Kitchen_Text_Image_Pairs_Dataset(self, ):
+        for index in tqdm(os.listdir(self.Epic_Kitchen_Text_Image_Pairs_dataset_path), desc='Loading Epic_Kitchen_Text_Image_Pairs_Dataset'):
+            path = os.path.join(self.Epic_Kitchen_Text_Image_Pairs_dataset_path, index)
+            with open(os.path.join(path, 'caption.txt'), 'r') as f:
+                caption = f.read()
+            image_path = os.path.join(path, 'image.png')
+            self.episodes.append({'image_path':image_path, 'caption':caption})
+        
     
     def __getitem__(self, i):
         image_p, text = self.episodes[i]['image_path'], self.episodes[i]['caption']
@@ -66,81 +85,83 @@ class Diffusion_Finetune_Dataset(Dataset):
     def __len__(self):
         return len(self.episodes)   
         
-            
-def fisheye_camera_longitude_latitude_correction(im: Image):
-    
-    width, high = im.size
-    sqrt_len = min(width, high)
-    im = im.transform((sqrt_len, sqrt_len),
-                        Image.EXTENT,
-                        ((width-sqrt_len)/2, (high-sqrt_len)/2, 
-                        sqrt_len+(width-sqrt_len)/2, sqrt_len+(high-sqrt_len)/2)
-                        )
-    width = high = sqrt_len
-    
-    idata = im.getdata()
-    odata = []
-    
-    alpha = math.pi/2
-    
-    out_high = round(high * math.tan(alpha/2))
-    out_width = round(width * math.tan(alpha/2))
-    out_radius = round(high * math.tan(alpha/2))
-    out_center_x = out_width / 2
-    out_center_y = out_high / 2
-    
-    out_bl_x = 0
-    out_br_x = out_width - 1
-    out_bt_y = 0
-    out_bb_y = out_high - 1
-    
-    out_bl_cx = out_bl_x - out_center_x
-    out_br_cx = out_br_x - out_center_x
-    out_bt_cy = out_bt_y - out_center_y
-    out_bb_cy = out_bb_y - out_center_y
-    
-    src_radius = round(high * math.sin(alpha/2))
-    src_center_x = width / 2
-    src_center_y = high / 2
-    
-    for i in range(0, high * width):
-        ox = math.floor(i / out_width)
-        oy = i % out_high
+
+class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
+    def __init__(self, split='train', preprocess=False, chunk=None, chunk_idx=None, filter_frame=False) -> None:
+        self._annotations_dir = 'datasets/epic-kitchen/epic-kitchens-100-annotations'
+        self._raw_video_dir = 'datasets/epic-kitchen/EK100_256p'
+        self._split = split
+        self._save_dir = 'datasets/epic-kitchen/text_image_pairs'
+        self._filter_frame = filter_frame
         
-        cx = ox - out_center_x
-        cy = oy - out_center_y
+        if preprocess:
+            self._device = "cuda" 
+            self.model, self.preprocess = clip.load("ViT-B/32", device=self._device)
+            self._preprocess_episodes_and_save()
         
-        out_distance = round(math.sqrt(pow(cx, 2) + pow(cy, 2)))
-        theta = math.atan2(cy, cx)
-        if (-math.pi/4 <= theta <= math.pi/4):
-            bx = out_radius * math.cos(math.pi/4)
-            by = bx * math.tan(theta)
-        elif (math.pi/4 <= theta <= math.pi*3/4):
-            by = out_radius * math.sin(math.pi/4)
-            bx = by / math.tan(theta)
-        elif (-math.pi*3/4 <= theta <= -math.pi/4):
-            by = out_radius * math.sin(-math.pi/4)
-            bx = by / math.tan(theta)
-        else:
-            bx = out_radius * math.cos(-math.pi*3/4)
-            by = bx * math.tan(theta)
-            
-        bdy_distance = round(math.sqrt(pow(cx, 2) + pow(cy, 2)))
-        src_distance = src_radius * bdy_distance / out_radius
-            
-        src_x = round(src_center_x + math.cos(theta) * src_distance)
-        src_y = round(src_center_y + math.sin(theta) * src_distance)
+    def _preprocess_episodes_and_save(self):
+        SAMPLE_FRAME_NUM_PER_VIDEO_CLIP = 20
         
-        src_idx = src_x*width + src_y    
-        if(0 < src_idx < high*width):
-            odata.append(idata[src_idx])
-        else:
-            odata.append((0,0,0))
-    
-    om = Image.new("RGB", (high, width))
-    om.putdata(odata)
-    
-    return om
+        df = pd.read_csv(os.path.join(self._annotations_dir, f'EPIC_100_{self._split}.csv'))
+        self.anno_datas = {}
+        self.text_image_pairs = []
+        # Load in format {'video_id': [[..], [..]]}
+        for index, row in df.iterrows():
+            video_id = row['video_id']
+            narrations = row['narration']
+            start_frame = row['start_frame']
+            stop_frame = row['stop_frame']
+            middle_frame = int((start_frame + stop_frame) // 2)
+            if not video_id in self.anno_datas:
+                self.anno_datas[video_id] = [{'narrations':narrations, 'start_frame':start_frame, 'stop_frame':stop_frame, 'middle_frame':middle_frame}] 
+            else:   
+                self.anno_datas[video_id].append({'narrations':narrations, 'start_frame':start_frame, 'stop_frame':stop_frame, 'middle_frame':middle_frame})
+        for video_id, v in tqdm(self.anno_datas.items(), desc='Loading video'):
+            base_video_name = video_id.split('_')[0]
+            video_path = os.path.join(self._raw_video_dir, base_video_name, f'{video_id}.MP4')
+            with open(video_path, 'rb') as f:
+                vr = VideoReader(f, ctx=cpu(0))
+            if self._filter_frame:
+                for narra in tqdm(v, desc='Loading video narrations'):
+                    start_frame = narra['start_frame']
+                    stop_frame = narra['stop_frame']
+                    middle_frame = narra['middle_frame']
+                    text = narra['narrations']
+                    # FPS = vr.get_avg_fps() 
+                    
+                    sample_interval_to_frame = math.ceil(((stop_frame - start_frame)) / SAMPLE_FRAME_NUM_PER_VIDEO_CLIP)
+                    # images = vr.get_batch(range(start_frame, stop_frame, sample_interval_to_frame)).asnumpy()
+                    
+                    images = vr.get_batch(range(middle_frame-int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2), middle_frame+int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))).asnumpy()
+                    images = [Image.fromarray((img)) for img in images]
+                
+                    # Do clip similar selection
+                    c_images = [self.preprocess(img) for img in images]
+                    c_images = torch.stack(c_images).to(self._device)
+                    c_text = clip.tokenize(text).to(self._device)
+                    with torch.no_grad():
+                        logits_per_image, logits_per_text = self.model(c_images, c_text)
+                        probs = logits_per_text.softmax(dim=-1).cpu().numpy()
+                        meaningful_image = images[probs.argmax()]   
+                    self.text_image_pairs.append({'text':text, 'image':meaningful_image, f'score2{SAMPLE_FRAME_NUM_PER_VIDEO_CLIP}':probs.max()})
+            else:
+                middle_frames = [narra['middle_frame'] for narra in v]
+                texts = [narra['narrations'] for narra in v]
+                images = vr.get_batch(middle_frames).asnumpy()
+                images = [Image.fromarray((img)) for img in images]
+                for t, im in zip(texts, images):
+                    self.text_image_pairs.append({'text':t, 'image':im})
+        
+        print('Text-Image Pairs num:', len(self.text_image_pairs))
+        sbar = tqdm(total=len(self.text_image_pairs), desc='Saving text_image_pairs')
+        for id, tip in enumerate(self.text_image_pairs):
+            os.makedirs(sp := os.path.join(self._save_dir, self._split, str(id)), exist_ok=True)
+            tip['image'].save(os.path.join(sp, 'image.png'))
+            with open(os.path.join(sp, 'caption.txt'), 'w') as f:
+                f.write(tip['text'])
+                # f.write('\n')
+                # f.write(str(tip[f'score2{SAMPLE_FRAME_NUM_PER_VIDEO_CLIP}']))
+            sbar.update(1)
 
 class EgoExo4d_Finetune_Dataset(Dataset):
     def __init__(self, split='val', data_path='datasets/EgoExo4d', cooking_only=True, preprocess=False, input_processor=None, output_vis_processor=None, test=False, chunk=None, chunk_idx=None) -> None:
@@ -448,7 +469,7 @@ class EgoExo4d_Prerain_Dataset(Dataset):
                     continue
                 mp4_p = os.path.join(frame_aligned_videos_p, mp4)
                 video_name = mp4.split('.')[0] if not 'aria' in mp4 else 'ego_rgb'
-                # Cv2 capture or imageio reader
+                # Cv2 capture or  decord reader
                 video_captures.update({video_name: cv2.VideoCapture(mp4_p)})
                 # video_captures.update({video_name: imageio.get_reader(mp4_p,'ffmpeg')})
             
@@ -638,6 +659,6 @@ class EgoExo4d_Prerain_Dataset(Dataset):
 if __name__ == '__main__':
     # pretrain = EgoExo4d_Prerain_Dataset(split='val', preprocess=True)
     args = parse_args()
-    finetune = EgoExo4d_Finetune_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx)
+    finetune = Epic_Kitchen_Text_Image_Pairs_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx, filter_frame=args.filter_frame)
     
     
