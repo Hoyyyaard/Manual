@@ -8,8 +8,8 @@
 2. clone annotations 
 git clone https://github.com/epic-kitchens/epic-kitchens-100-annotations.git
 
-data tree
-- Minigpt-5
+data tree after 1.2.
+- Manual
     - datasets
         -epic-kitchen
             -EK100_256p

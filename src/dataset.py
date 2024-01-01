@@ -8,7 +8,7 @@ from pathlib import Path
 import imageio
 from PIL import Image
 import sys
-sys.path.append('../')
+sys.path.append('/project/pi_chuangg_umass_edu/chenpeihao/Projects/hongyanzhi/MiniGPT-5/')
 from constants import *
 import random
 import numpy as np
@@ -64,12 +64,13 @@ class Diffusion_Finetune_Dataset(Dataset):
                 self.episodes.append({'image_path':pa, 'caption':ca})
                 
     def load_from_Epic_Kitchen_Text_Image_Pairs_Dataset(self, ):
-        for index in tqdm(os.listdir(self.Epic_Kitchen_Text_Image_Pairs_dataset_path), desc='Loading Epic_Kitchen_Text_Image_Pairs_Dataset'):
-            path = os.path.join(self.Epic_Kitchen_Text_Image_Pairs_dataset_path, index)
-            with open(os.path.join(path, 'caption.txt'), 'r') as f:
-                caption = f.read()
-            image_path = os.path.join(path, 'image.png')
-            self.episodes.append({'image_path':image_path, 'caption':caption})
+        for video_index in tqdm(os.listdir(self.Epic_Kitchen_Text_Image_Pairs_dataset_path), desc='Loading Epic_Kitchen_Text_Image_Pairs_Dataset'):
+            for index in (os.listdir(os.path.join(self.Epic_Kitchen_Text_Image_Pairs_dataset_path, video_index))):
+                path = os.path.join(self.Epic_Kitchen_Text_Image_Pairs_dataset_path, video_index, index)
+                with open(os.path.join(path, 'caption.txt'), 'r') as f:
+                    caption = f.read()
+                image_path = os.path.join(path, 'image.png')
+                self.episodes.append({'image_path':image_path, 'caption':caption})
         
     
     def __getitem__(self, i):
@@ -100,11 +101,11 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
             self._preprocess_episodes_and_save()
         
     def _preprocess_episodes_and_save(self):
-        SAMPLE_FRAME_NUM_PER_VIDEO_CLIP = 20
+        SAMPLE_FRAME_NUM_PER_VIDEO_CLIP = 10
         
         df = pd.read_csv(os.path.join(self._annotations_dir, f'EPIC_100_{self._split}.csv'))
         self.anno_datas = {}
-        self.text_image_pairs = []
+        total_pairs = 0
         # Load in format {'video_id': [[..], [..]]}
         for index, row in df.iterrows():
             video_id = row['video_id']
@@ -117,6 +118,9 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
             else:   
                 self.anno_datas[video_id].append({'narrations':narrations, 'start_frame':start_frame, 'stop_frame':stop_frame, 'middle_frame':middle_frame})
         for video_id, v in tqdm(self.anno_datas.items(), desc='Loading video'):
+            if os.path.exists(os.path.join(self._save_dir, self._split, video_id)):
+                continue
+            self.text_image_pairs = []
             base_video_name = video_id.split('_')[0]
             video_path = os.path.join(self._raw_video_dir, base_video_name, f'{video_id}.MP4')
             with open(video_path, 'rb') as f:
@@ -131,8 +135,9 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
                     
                     sample_interval_to_frame = math.ceil(((stop_frame - start_frame)) / SAMPLE_FRAME_NUM_PER_VIDEO_CLIP)
                     # images = vr.get_batch(range(start_frame, stop_frame, sample_interval_to_frame)).asnumpy()
-                    
-                    images = vr.get_batch(range(middle_frame-int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2), middle_frame+int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))).asnumpy()
+                    range_low = max(start_frame, middle_frame-int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
+                    range_high = min(stop_frame, middle_frame+int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
+                    images = vr.get_batch(range(range_low , range_high)).asnumpy()
                     images = [Image.fromarray((img)) for img in images]
                 
                     # Do clip similar selection
@@ -151,17 +156,18 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
                 images = [Image.fromarray((img)) for img in images]
                 for t, im in zip(texts, images):
                     self.text_image_pairs.append({'text':t, 'image':im})
-        
-        print('Text-Image Pairs num:', len(self.text_image_pairs))
-        sbar = tqdm(total=len(self.text_image_pairs), desc='Saving text_image_pairs')
-        for id, tip in enumerate(self.text_image_pairs):
-            os.makedirs(sp := os.path.join(self._save_dir, self._split, str(id)), exist_ok=True)
-            tip['image'].save(os.path.join(sp, 'image.png'))
-            with open(os.path.join(sp, 'caption.txt'), 'w') as f:
-                f.write(tip['text'])
-                # f.write('\n')
-                # f.write(str(tip[f'score2{SAMPLE_FRAME_NUM_PER_VIDEO_CLIP}']))
-            sbar.update(1)
+
+            total_pairs += len(self.text_image_pairs)
+            print('Total Text-Image Pairs num:', total_pairs)
+            sbar = tqdm(total=len(self.text_image_pairs), desc='Saving text_image_pairs')
+            for id, tip in enumerate(self.text_image_pairs):
+                os.makedirs(sp := os.path.join(self._save_dir, self._split, video_id, str(id)), exist_ok=True)
+                tip['image'].save(os.path.join(sp, 'image.png'))
+                with open(os.path.join(sp, 'caption.txt'), 'w') as f:
+                    f.write(tip['text'])
+                    # f.write('\n')
+                    # f.write(str(tip[f'score2{SAMPLE_FRAME_NUM_PER_VIDEO_CLIP}']))
+                sbar.update(1)
 
 class EgoExo4d_Finetune_Dataset(Dataset):
     def __init__(self, split='val', data_path='datasets/EgoExo4d', cooking_only=True, preprocess=False, input_processor=None, output_vis_processor=None, test=False, chunk=None, chunk_idx=None) -> None:
