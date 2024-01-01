@@ -1,0 +1,17 @@
+.DS_Store
+*.log
+*.pyc
+build/
+dist/
+*.egg-info
+.idea/
+lightning_logs/
+venv/
+.vscode/
+**.pth
+tp/*
+*.mp4
+*.json
+**/outputs/**
+.ipynb_checkpoints
+ego4d/internal/human_pose/outputs/*
