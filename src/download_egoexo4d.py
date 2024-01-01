@@ -20,5 +20,7 @@ for take in cooking_takes:
 
 # print(cooking_takes_str)
 
-command = f'egoexo -o datasets/EgoExo4d/ -y --parts takes annotations metadata trajectory --uids {cooking_takes_str}'
+command = f'egoexo -o datasets/EgoExo4d/ -y \
+            --parts takes annotations metadata trajectory \
+            --uids {cooking_takes_str}'
 os.system(command)
