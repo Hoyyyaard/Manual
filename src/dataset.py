@@ -241,6 +241,7 @@ class EgoExo4d_Finetune_Dataset(Dataset):
         self._chunk = chunk
         self._chunk_idx = chunk_idx
         
+        
         if preprocess:
             self._device = "cuda" 
             self.model, self.preprocess = clip.load("ViT-B/32", device=self._device)
