@@ -137,7 +137,7 @@ More information on all the CLI arguments and the environment are available on y
         f.write(yaml + model_card)
 
 
-def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, epoch, val_batch=None):
+def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, step, val_batch=None, epoch=None):
     logger.info("Running validation... ")
 
     pipeline = StableDiffusionPipeline.from_pretrained(
@@ -179,7 +179,12 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
                 h_concat.paste(image, (image.width, 0))
                 images.append(h_concat)
                 args.validation_prompts.append(text)
-                
+    
+    #  Log images to disk
+    for img, prompt in zip(images, args.validation_prompts):
+        os.makedirs(os.path.join(args.output_dir, 'vis', f'epoch[{epoch}]_step[{step}]'), exist_ok=True)
+        img.save(os.path.join(args.output_dir, 'vis', f'epoch[{epoch}]_step[{step}]', f"{prompt.replace(' ', '_')}.png"))
+    
     for tracker in accelerator.trackers:
         if tracker.name == "tensorboard":
             np_images = np.stack([np.asarray(img) for img in images])
@@ -795,6 +800,7 @@ def main():
         return inputs.input_ids[0]
     def preprocess_func(image, text):
         return train_transforms(image), tokenize_captions(text)
+    print("Loading dataset...")
     train_dataset = Diffusion_Finetune_Dataset(preprocess_func=preprocess_func)
     
     # DataLoaders creation:
@@ -1040,7 +1046,8 @@ def main():
                     accelerator,
                     weight_dtype,
                     global_step,
-                    val_batch=batch
+                    val_batch=batch,
+                    epoch=epoch,
                 )
                 if args.use_ema:
                     # Switch back to the original UNet parameters.

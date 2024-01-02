@@ -8,7 +8,13 @@ from pathlib import Path
 import imageio
 from PIL import Image
 import sys
-sys.path.append('/project/pi_chuangg_umass_edu/chenpeihao/Projects/hongyanzhi/MiniGPT-5/')
+# Abs file dir of this file
+current_file_path = os.path.abspath(__file__)
+# parent directory of this file
+parent_directory = os.path.dirname(current_file_path)
+base_dir = os.path.dirname(parent_directory)
+print(base_dir)
+sys.path.append(base_dir)
 from constants import *
 import random
 import numpy as np
@@ -37,7 +43,7 @@ class Diffusion_Finetune_Dataset(Dataset):
         This dataset will leverage different preprocessed dataset:
             1. EgoExo4d_Finetune_Dataset
     '''
-    def __init__(self, split='val', preprocess_func=None, dataset_list= ['epic']):
+    def __init__(self, split='train', preprocess_func=None, dataset_list= ['epic']):
         self.EgoExo4d_Finetune_dataset_path = os.path.join('datasets', 'EgoExo4d', 'preprocessed_episodes_finetune', split)
         self.Epic_Kitchen_Text_Image_Pairs_dataset_path = os.path.join('datasets', 'epic-kitchen', 'text_image_pairs', split)
         self.preprocess_func = preprocess_func
@@ -47,9 +53,25 @@ class Diffusion_Finetune_Dataset(Dataset):
             print("Loading EgoExo4d_Finetune_Dataset..")
             self.load_from_EgoExo4d_Finetune_Dataset()
         if 'epic' in dataset_list:
-            print("Loading Epic_Kitchen_Text_Image_Pairs_Dataset..")
-            self.load_from_Epic_Kitchen_Text_Image_Pairs_Dataset()
+            saved_data_path = os.path.join(self.Epic_Kitchen_Text_Image_Pairs_dataset_path, 'image_text_pairs.pkl')
+            if os.path.exists(saved_data_path):
+                print("Loading saved data...")
+                self.recover_data(saved_data_path)
+                print("Loaded saved data for Epic_Kitchen_Text_Image_Pairs_Dataset!")
+            else:
+                print("Loading Epic_Kitchen_Text_Image_Pairs_Dataset..")
+                self.load_from_Epic_Kitchen_Text_Image_Pairs_Dataset()
+                self.save_process_data(saved_data_path)
+    
+    def recover_data(self, saved_file):
+        all_data = torch.load(saved_file)
+        self.episodes = all_data['episodes']
+        del all_data
         
+    def save_process_data(self, saved_file):
+        all_data = {'episodes': self.episodes}
+        torch.save(all_data, saved_file)
+       
     def load_from_EgoExo4d_Finetune_Dataset(self, ):
         # Each episode will be in format {'image_path', 'caption'}
         for task_name in tqdm(os.listdir(self.EgoExo4d_Finetune_dataset_path), desc='Loading EgoExo4d_Finetune_Dataset'):
@@ -125,30 +147,34 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
             video_path = os.path.join(self._raw_video_dir, base_video_name, f'{video_id}.MP4')
             with open(video_path, 'rb') as f:
                 vr = VideoReader(f, ctx=cpu(0))
+            
             if self._filter_frame:
-                for narra in tqdm(v, desc='Loading video narrations'):
-                    start_frame = narra['start_frame']
-                    stop_frame = narra['stop_frame']
-                    middle_frame = narra['middle_frame']
-                    text = narra['narrations']
-                    # FPS = vr.get_avg_fps() 
+                try:
+                    for narra in tqdm(v, desc='Loading video narrations'):
+                        start_frame = narra['start_frame']
+                        stop_frame = narra['stop_frame']
+                        middle_frame = narra['middle_frame']
+                        text = narra['narrations']
+                        # FPS = vr.get_avg_fps() 
+                        
+                        sample_interval_to_frame = math.ceil(((stop_frame - start_frame)) / SAMPLE_FRAME_NUM_PER_VIDEO_CLIP)
+                        # images = vr.get_batch(range(start_frame, stop_frame, sample_interval_to_frame)).asnumpy()
+                        range_low = max(start_frame, middle_frame-int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
+                        range_high = min(stop_frame, middle_frame+int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
+                        images = vr.get_batch(range(range_low , range_high)).asnumpy()
+                        images = [Image.fromarray((img)) for img in images]
                     
-                    sample_interval_to_frame = math.ceil(((stop_frame - start_frame)) / SAMPLE_FRAME_NUM_PER_VIDEO_CLIP)
-                    # images = vr.get_batch(range(start_frame, stop_frame, sample_interval_to_frame)).asnumpy()
-                    range_low = max(start_frame, middle_frame-int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
-                    range_high = min(stop_frame, middle_frame+int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
-                    images = vr.get_batch(range(range_low , range_high)).asnumpy()
-                    images = [Image.fromarray((img)) for img in images]
-                
-                    # Do clip similar selection
-                    c_images = [self.preprocess(img) for img in images]
-                    c_images = torch.stack(c_images).to(self._device)
-                    c_text = clip.tokenize(text).to(self._device)
-                    with torch.no_grad():
-                        logits_per_image, logits_per_text = self.model(c_images, c_text)
-                        probs = logits_per_text.softmax(dim=-1).cpu().numpy()
-                        meaningful_image = images[probs.argmax()]   
-                    self.text_image_pairs.append({'text':text, 'image':meaningful_image, f'score2{SAMPLE_FRAME_NUM_PER_VIDEO_CLIP}':probs.max()})
+                        # Do clip similar selection
+                        c_images = [self.preprocess(img) for img in images]
+                        c_images = torch.stack(c_images).to(self._device)
+                        c_text = clip.tokenize(text).to(self._device)
+                        with torch.no_grad():
+                            logits_per_image, logits_per_text = self.model(c_images, c_text)
+                            probs = logits_per_text.softmax(dim=-1).cpu().numpy()
+                            meaningful_image = images[probs.argmax()]   
+                        self.text_image_pairs.append({'text':text, 'image':meaningful_image, f'score2{SAMPLE_FRAME_NUM_PER_VIDEO_CLIP}':probs.max()})
+                except:
+                    continue
             else:
                 middle_frames = [narra['middle_frame'] for narra in v]
                 texts = [narra['narrations'] for narra in v]
