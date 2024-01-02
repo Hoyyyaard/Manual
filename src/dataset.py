@@ -13,7 +13,7 @@ current_file_path = os.path.abspath(__file__)
 # parent directory of this file
 parent_directory = os.path.dirname(current_file_path)
 base_dir = os.path.dirname(parent_directory)
-print(base_dir)
+# print(base_dir)
 sys.path.append(base_dir)
 from constants import *
 import random
@@ -121,9 +121,24 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
             self._device = "cuda" 
             self.model, self.preprocess = clip.load("ViT-B/32", device=self._device)
             self._preprocess_episodes_and_save()
-        
+    
+    def _calculate_sharp_score(self, images):
+        scores = []
+        for img in images:
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            blurred_image = cv2.GaussianBlur(img, (3, 3), 0)
+            # 计算拉普拉斯算子
+            laplacian_image = cv2.Laplacian(blurred_image, cv2.CV_64F)
+            sharpness = np.var(laplacian_image)
+            scores.append(sharpness)
+        return np.array(scores)
+
     def _preprocess_episodes_and_save(self):
-        SAMPLE_FRAME_NUM_PER_VIDEO_CLIP = 10
+        def np_softmax(x):
+            e_x = np.exp(x - np.max(x))  
+            return e_x / e_x.sum(axis=0)
+        
+        SAMPLE_FRAME_NUM_PER_VIDEO_CLIP = 30
         
         df = pd.read_csv(os.path.join(self._annotations_dir, f'EPIC_100_{self._split}.csv'))
         self.anno_datas = {}
@@ -137,6 +152,7 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
             middle_frame = int((start_frame + stop_frame) // 2)
             if not video_id in self.anno_datas:
                 self.anno_datas[video_id] = [{'narrations':narrations, 'start_frame':start_frame, 'stop_frame':stop_frame, 'middle_frame':middle_frame}] 
+                # self.anno_datas[video_id] = []
             else:   
                 self.anno_datas[video_id].append({'narrations':narrations, 'start_frame':start_frame, 'stop_frame':stop_frame, 'middle_frame':middle_frame})
         for video_id, v in tqdm(self.anno_datas.items(), desc='Loading video'):
@@ -158,12 +174,25 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
                         # FPS = vr.get_avg_fps() 
                         
                         sample_interval_to_frame = math.ceil(((stop_frame - start_frame)) / SAMPLE_FRAME_NUM_PER_VIDEO_CLIP)
-                        # images = vr.get_batch(range(start_frame, stop_frame, sample_interval_to_frame)).asnumpy()
-                        range_low = max(start_frame, middle_frame-int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
-                        range_high = min(stop_frame, middle_frame+int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
-                        images = vr.get_batch(range(range_low , range_high)).asnumpy()
+                        images = vr.get_batch(range(start_frame, stop_frame, sample_interval_to_frame)).asnumpy()
+                        # range_low = max(start_frame, middle_frame-int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
+                        # range_high = min(stop_frame, middle_frame+int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
+                        # images = vr.get_batch(range(range_low , range_high)).asnumpy()
+                        
+                        # Do sharpness filter
+                        sharp_scores = self._calculate_sharp_score(images)
+                        sharp_scores = np_softmax(sharp_scores)
+                        # print(sharp_scores)
+                        
                         images = [Image.fromarray((img)) for img in images]
-                    
+                        
+                        # save images and named as score
+                        # for ii,im in enumerate(images):
+                        #     im.save(os.path.join('results', f'{sharp_scores[ii]}.png'))
+                        
+                        # assert False
+                        meaningful_image_test = images[sharp_scores.argmax()]  
+                        
                         # Do clip similar selection
                         c_images = [self.preprocess(img) for img in images]
                         c_images = torch.stack(c_images).to(self._device)
@@ -171,10 +200,17 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
                         with torch.no_grad():
                             logits_per_image, logits_per_text = self.model(c_images, c_text)
                             probs = logits_per_text.softmax(dim=-1).cpu().numpy()
-                            meaningful_image = images[probs.argmax()]   
-                        self.text_image_pairs.append({'text':text, 'image':meaningful_image, f'score2{SAMPLE_FRAME_NUM_PER_VIDEO_CLIP}':probs.max()})
-                except:
+                            
+                        # Weight the two scores
+                        meaningful_image = images[(probs+sharp_scores).argmax()]   
+                        # h_concat = Image.new('RGB', (meaningful_image.width * 2, meaningful_image.height))
+                        # h_concat.paste(meaningful_image, (0, 0))
+                        # h_concat.paste(meaningful_image_test, (meaningful_image.width, 0))
+                        self.text_image_pairs.append({'text':text, 'image':meaningful_image})
+                except Exception as e:
+                    print(e)
                     continue
+
             else:
                 middle_frames = [narra['middle_frame'] for narra in v]
                 texts = [narra['narrations'] for narra in v]
@@ -692,5 +728,3 @@ if __name__ == '__main__':
     # pretrain = EgoExo4d_Prerain_Dataset(split='val', preprocess=True)
     args = parse_args()
     finetune = Epic_Kitchen_Text_Image_Pairs_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx, filter_frame=args.filter_frame)
-    
-    
