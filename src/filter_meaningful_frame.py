@@ -130,8 +130,9 @@ if __name__ == '__main__':
     from projectaria_tools.core.stream_id import RecordableTypeId, StreamId
     import numpy as np
     from matplotlib import pyplot as plt
+    from projectaria_tools.core.sophus import SE3
     
-    provider = data_provider.create_vrs_data_provider('/project/pi_chuangg_umass_edu/chenpeihao/Projects/hongyanzhi/MiniGPT-5/datasets/sample.vrs')
+    provider = data_provider.create_vrs_data_provider('/project/pi_chuangg_umass_edu/chenpeihao/Projects/hongyanzhi/MiniGPT-5/datasets/EgoExo4d/captures/videos/aria01.vrs')
     
     camera_name = "camera-rgb"
     sensor_name = "camera-rgb"
@@ -204,19 +205,30 @@ if __name__ == '__main__':
      # [[k_0: k_5]  {p_0 p_1} {s_0 s_1 s_2 s_3}]
     D = np.array([-0.024876972660422325, 0.09810236096382141, -0.06655783951282501, 0.008734318427741528, 0.0025442445185035467, -0.0005746951792389154, -0.0003363479918334633, 1.1586302207433619e-05, -0.0005165732582099736, -5.950118065811694e-05, 0.00037607509875670075, -1.358488134428626e-05])
     
+    DD = np.array([1220.023996423738,1465.740842972049,1444.456400131055,0.3873017203659512,-0.3028693288398382,-0.4233073492385598,1.992695711098763,-2.275773876360815,0.7960163711144228,0.0002886837163548054,0.0002861485206749526,-0.0006876592045433987,0.0001215696733149477,-0.001279450308854052,0.0002554384029135424])
+    
+    se3_instance = SE3.from_quat_and_translation(0.9413135313012251, np.array([0.33344618193065784,0.037802929278451275,0.03624111040038306]), np.array([-0.004473207879487903,-0.01184645971386183,-0.004889051154160274]))
+    se3_instance = SE3.from_quat_and_translation(1, np.array([0.,0.,0.]), np.array([0.,0.,0.]))
     # 2. _core_pybinds.calibration.CameraCalibration(arg0: str, arg1: _core_pybinds.calibration.CameraModelType, arg2: numpy.ndarray[numpy.float64[m, 1]], arg3: SE3, arg4: int, arg5: int, arg6: Optional[float], arg7: float, arg8: str)
-    sr_calib = CameraCalibration('camera-rgb', CameraModelType.FISHEYE624, D)
+
     
    
 
     # 输入图像宽度和高度
     image_width = frame.shape[1]
     image_height = frame.shape[0]
+    
+    # src_calib = CameraCalibration('camera-rgb', CameraModelType.FISHEYE624, DD , se3_instance, image_width, image_height, None, 0, '0450577b730401974401100000000000')
+    
+    dst_calib = calibration.get_linear_camera_calibration(image_width, image_height, 700, camera_name)
+    print(src_calib)
+    # distort image
+    rectified_array = calibration.distort_by_calibration(frame, dst_calib, src_calib, InterpolationMethod.BILINEAR)
 
     # 初始化映射矩阵
-    mapx, mapy = cv2.fisheye.initUndistortRectifyMap(K, D, None, K, (image_width, image_height), cv2.CV_32FC1)
-    corrected_image = cv2.remap(frame, mapx, mapy, interpolation=cv2.INTER_LINEAR)
+    # mapx, mapy = cv2.fisheye.initUndistortRectifyMap(K, D, None, K, (image_width, image_height), cv2.CV_32FC1)
+    # corrected_image = cv2.remap(frame, mapx, mapy, interpolation=cv2.INTER_LINEAR)
     
-    cv2.imwrite('results/corrected_image.png', corrected_image)
+    cv2.imwrite('results/corrected_image.png', rectified_array)
     cv2.imwrite('results/frame.png', frame)
     

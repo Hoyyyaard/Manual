@@ -25,6 +25,15 @@ import argparse
 from decord import VideoReader
 from decord import cpu, gpu
 import math
+from projectaria_tools.core import data_provider, calibration
+from projectaria_tools.core.calibration import CameraCalibration, CameraModelType
+from projectaria_tools.core import data_provider, calibration
+from projectaria_tools.core.image import InterpolationMethod
+from projectaria_tools.core.sensor_data import TimeDomain, TimeQueryOptions
+from projectaria_tools.core.stream_id import RecordableTypeId, StreamId
+import numpy as np
+from matplotlib import pyplot as plt
+from projectaria_tools.core.sophus import SE3
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Preprocess EgoExo4d dataset')
@@ -34,7 +43,7 @@ def parse_args():
     parser.add_argument('--preprocess', action='store_true', help='Preprocess dataset')
     parser.add_argument('--chunk', type=int, default=1, help='Chunk size for preprocessed dataset')
     parser.add_argument('--chunk_idx', type=int, default=0, help='Chunk index for preprocessed dataset')
-    parser.add_argument('--filter_frame',action='store_true', help='Use clip to filter frames')
+    parser.add_argument('--dataset',choices=['egoexo_pretrain', 'egoexo_finetune', 'epic_pretrain'],required=True, help='Dataset to use')
     args = parser.parse_args()
     return args
 
@@ -110,12 +119,11 @@ class Diffusion_Finetune_Dataset(Dataset):
         
 
 class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
-    def __init__(self, split='train', preprocess=False, chunk=None, chunk_idx=None, filter_frame=False) -> None:
+    def __init__(self, split='train', preprocess=False, chunk=None, chunk_idx=None) -> None:
         self._annotations_dir = 'datasets/epic-kitchen/epic-kitchens-100-annotations'
         self._raw_video_dir = 'datasets/epic-kitchen/EK100_256p'
         self._split = split
         self._save_dir = 'datasets/epic-kitchen/text_image_pairs'
-        self._filter_frame = filter_frame
         
         if preprocess:
             self._device = "cuda" 
@@ -123,20 +131,19 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
             self._preprocess_episodes_and_save()
     
     def _calculate_sharp_score(self, images):
+        def np_softmax(x):
+            e_x = np.exp(x - np.max(x))  
+            return e_x / e_x.sum(axis=0)
         scores = []
         for img in images:
             img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
             blurred_image = cv2.GaussianBlur(img, (3, 3), 0)
-            # 计算拉普拉斯算子
             laplacian_image = cv2.Laplacian(blurred_image, cv2.CV_64F)
             sharpness = np.var(laplacian_image)
             scores.append(sharpness)
-        return np.array(scores)
+        return np_softmax(np.array(scores))
 
     def _preprocess_episodes_and_save(self):
-        def np_softmax(x):
-            e_x = np.exp(x - np.max(x))  
-            return e_x / e_x.sum(axis=0)
         
         SAMPLE_FRAME_NUM_PER_VIDEO_CLIP = 30
         
@@ -164,60 +171,50 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
             with open(video_path, 'rb') as f:
                 vr = VideoReader(f, ctx=cpu(0))
             
-            if self._filter_frame:
-                try:
-                    for narra in tqdm(v, desc='Loading video narrations'):
-                        start_frame = narra['start_frame']
-                        stop_frame = narra['stop_frame']
-                        middle_frame = narra['middle_frame']
-                        text = narra['narrations']
-                        # FPS = vr.get_avg_fps() 
+            try:
+                for narra in tqdm(v, desc='Loading video narrations'):
+                    start_frame = narra['start_frame']
+                    stop_frame = narra['stop_frame']
+                    middle_frame = narra['middle_frame']
+                    text = narra['narrations']
+                    # FPS = vr.get_avg_fps() 
+                    
+                    sample_interval_to_frame = math.ceil(((stop_frame - start_frame)) / SAMPLE_FRAME_NUM_PER_VIDEO_CLIP)
+                    images = vr.get_batch(range(start_frame, stop_frame, sample_interval_to_frame)).asnumpy()
+                    # range_low = max(start_frame, middle_frame-int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
+                    # range_high = min(stop_frame, middle_frame+int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
+                    # images = vr.get_batch(range(range_low , range_high)).asnumpy()
+                    
+                    # Do sharpness filter
+                    sharp_scores = self._calculate_sharp_score(images)
+                    # print(sharp_scores)
+                    
+                    images = [Image.fromarray((img)) for img in images]
+                    
+                    # save images and named as score
+                    # for ii,im in enumerate(images):
+                    #     im.save(os.path.join('results', f'{sharp_scores[ii]}.png'))
+                    
+                    # assert False
+                    meaningful_image_test = images[sharp_scores.argmax()]  
+                    
+                    # Do clip similar selection
+                    c_images = [self.preprocess(img) for img in images]
+                    c_images = torch.stack(c_images).to(self._device)
+                    c_text = clip.tokenize(text).to(self._device)
+                    with torch.no_grad():
+                        logits_per_image, logits_per_text = self.model(c_images, c_text)
+                        probs = logits_per_text.softmax(dim=-1).cpu().numpy()
                         
-                        sample_interval_to_frame = math.ceil(((stop_frame - start_frame)) / SAMPLE_FRAME_NUM_PER_VIDEO_CLIP)
-                        images = vr.get_batch(range(start_frame, stop_frame, sample_interval_to_frame)).asnumpy()
-                        # range_low = max(start_frame, middle_frame-int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
-                        # range_high = min(stop_frame, middle_frame+int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
-                        # images = vr.get_batch(range(range_low , range_high)).asnumpy()
-                        
-                        # Do sharpness filter
-                        sharp_scores = self._calculate_sharp_score(images)
-                        sharp_scores = np_softmax(sharp_scores)
-                        # print(sharp_scores)
-                        
-                        images = [Image.fromarray((img)) for img in images]
-                        
-                        # save images and named as score
-                        # for ii,im in enumerate(images):
-                        #     im.save(os.path.join('results', f'{sharp_scores[ii]}.png'))
-                        
-                        # assert False
-                        meaningful_image_test = images[sharp_scores.argmax()]  
-                        
-                        # Do clip similar selection
-                        c_images = [self.preprocess(img) for img in images]
-                        c_images = torch.stack(c_images).to(self._device)
-                        c_text = clip.tokenize(text).to(self._device)
-                        with torch.no_grad():
-                            logits_per_image, logits_per_text = self.model(c_images, c_text)
-                            probs = logits_per_text.softmax(dim=-1).cpu().numpy()
-                            
-                        # Weight the two scores
-                        meaningful_image = images[(probs+sharp_scores).argmax()]   
-                        # h_concat = Image.new('RGB', (meaningful_image.width * 2, meaningful_image.height))
-                        # h_concat.paste(meaningful_image, (0, 0))
-                        # h_concat.paste(meaningful_image_test, (meaningful_image.width, 0))
-                        self.text_image_pairs.append({'text':text, 'image':meaningful_image})
-                except Exception as e:
-                    print(e)
-                    continue
-
-            else:
-                middle_frames = [narra['middle_frame'] for narra in v]
-                texts = [narra['narrations'] for narra in v]
-                images = vr.get_batch(middle_frames).asnumpy()
-                images = [Image.fromarray((img)) for img in images]
-                for t, im in zip(texts, images):
-                    self.text_image_pairs.append({'text':t, 'image':im})
+                    # Weight the two scores
+                    meaningful_image = images[(probs+sharp_scores).argmax()]   
+                    # h_concat = Image.new('RGB', (meaningful_image.width * 2, meaningful_image.height))
+                    # h_concat.paste(meaningful_image, (0, 0))
+                    # h_concat.paste(meaningful_image_test, (meaningful_image.width, 0))
+                    self.text_image_pairs.append({'text':text, 'image':meaningful_image})
+            except Exception as e:
+                print(e)
+                continue
 
             total_pairs += len(self.text_image_pairs)
             print('Total Text-Image Pairs num:', total_pairs)
@@ -231,8 +228,9 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
                     # f.write(str(tip[f'score2{SAMPLE_FRAME_NUM_PER_VIDEO_CLIP}']))
                 sbar.update(1)
 
+
 class EgoExo4d_Finetune_Dataset(Dataset):
-    def __init__(self, split='val', data_path='datasets/EgoExo4d', cooking_only=True, preprocess=False, input_processor=None, output_vis_processor=None, test=False, chunk=None, chunk_idx=None) -> None:
+    def __init__(self, split='train', data_path='datasets/EgoExo4d', cooking_only=True, preprocess=False, input_processor=None, output_vis_processor=None, test=False, chunk=None, chunk_idx=None) -> None:
         self.episodes = []
         self._data_root_dir = data_path
         self._split = split
@@ -241,13 +239,38 @@ class EgoExo4d_Finetune_Dataset(Dataset):
         self._chunk = chunk
         self._chunk_idx = chunk_idx
         
+        # Ugly implementation for fisheye distortion
+        OUTPUT_FOV = 700
+        provider = data_provider.create_vrs_data_provider('datasets/EgoExo4d/example.vrs')
+        sensor_stream_id = provider.get_stream_id_from_label('camera-rgb')
+        image_data = provider.get_image_data_by_index(sensor_stream_id, 0)
+        device_calib = provider.get_device_calibration()
+        self._src_calib = device_calib.get_camera_calib('camera-rgb')
+        tmp_image_array = image_data[0].to_numpy_array()
+        self._dst_calib = calibration.get_linear_camera_calibration(tmp_image_array.shape[1], tmp_image_array.shape[0], OUTPUT_FOV, 'camera-rgb')
+        
         if preprocess:
             self._device = "cuda" 
             self.model, self.preprocess = clip.load("ViT-B/32", device=self._device)
             self._load_neccesary_data()
             print('INFO: [ Preprocess episodes and save ]')
             self._preprocess_episodes_and_save()
-            
+
+    def _calculate_sharp_score(self, images):
+        scores = []
+        for img in images:
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            blurred_image = cv2.GaussianBlur(img, (3, 3), 0)
+            laplacian_image = cv2.Laplacian(blurred_image, cv2.CV_64F)
+            sharpness = np.var(laplacian_image)
+            scores.append(sharpness)
+        return np.array(scores)
+    
+    def _distort_by_calibration(self, frame):
+        rectified_array = calibration.distort_by_calibration(frame, self._dst_calib, self._src_calib, InterpolationMethod.BILINEAR)
+        
+        return rectified_array
+    
     def _load_neccesary_data(self):
         with open(os.path.join(self._data_root_dir, 'takes.json'), 'r') as f:
             takes = json.load(f)
@@ -268,7 +291,7 @@ class EgoExo4d_Finetune_Dataset(Dataset):
                 }
                 
     def _preprocess_episodes_and_save(self):
-        SAMPLE_FRAME_NUM_PER_SECOND = 10
+        SAMPLE_FRAME_NUM_PER_SECOND = 30
         
         epi_save_dir = os.path.join(self._data_root_dir, 'preprocessed_episodes_finetune', self._split)
         total_takes = os.listdir(os.path.join(self._data_root_dir, 'takes'))
@@ -298,22 +321,29 @@ class EgoExo4d_Finetune_Dataset(Dataset):
                 mp4_p = os.path.join(frame_aligned_videos_p, mp4)
                 video_name = mp4.split('.')[0] if not 'aria' in mp4 else 'ego_rgb'
                 # Cv2 capture or imageio reader
-                video_captures.update({video_name: cv2.VideoCapture(mp4_p)})
-                # video_captures.update({video_name: imageio.get_reader(mp4_p,'ffmpeg')})
+                # video_captures.update({video_name: cv2.VideoCapture(mp4_p)})
+                with open(mp4_p, 'rb') as f:
+                    video_captures.update({video_name: VideoReader(f, ctx=cpu(0))})
                 
             epi = {}
             epi['exocentric_images'] = []
             epi['egocentric_images'] = []
             epi['captions'] = []
             # Sample exo-centirc images only one time
+            del_keys = []
             for k,v in video_captures.items():
                 if 'ego' in k:
                     continue
                 # 100 to avoid some shelter from first few frames
-                v.set(cv2.CAP_PROP_POS_FRAMES, 100)
-                ret, frame = v.read()
-                assert ret
-                epi['exocentric_images'].append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))) 
+                # v.set(cv2.CAP_PROP_POS_FRAMES, 100)
+                # ret, frame = v.read()
+                # assert ret
+                # epi['exocentric_images'].append(Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)))
+                frame = v[100].asnumpy()
+                epi['exocentric_images'].append(Image.fromarray(frame)) 
+                del_keys.append(k)
+            for k in del_keys:
+                del video_captures[k]
                 
             # Load pretrain data : narrations and exocentric images
             if not self.taskname_uid[take_name] in self.key_frame_annotations:
@@ -322,21 +352,33 @@ class EgoExo4d_Finetune_Dataset(Dataset):
             for anno in tqdm(key_frame_annotations,desc='Loading episode within a take'):
                 ego_video_capture = video_captures['ego_rgb']
                 images = []
+                images4sharp = []
                 text = anno['step_description']
                 
                 # There will be caption duplication in one take
                 if text in epi['captions']:
                     continue
                 
-                FPS = ego_video_capture.get(cv2.CAP_PROP_FPS)
+                # FPS = ego_video_capture.get(cv2.CAP_PROP_FPS)
+                FPS = ego_video_capture.get_avg_fps()
                 delta_time = math.ceil(anno['end_time'] - anno['start_time'])
                 sample_total_frame = int(delta_time * SAMPLE_FRAME_NUM_PER_SECOND)  
                 sample_interval_to_frame = int((delta_time * FPS) / sample_total_frame)
-                for fra in range(int(FPS*anno['start_time']), int(FPS*anno['end_time']), sample_interval_to_frame):
-                    ego_video_capture.set(cv2.CAP_PROP_POS_FRAMES, fra)
-                    ret, frame = ego_video_capture.read()
-                    assert ret
-                    images.append((Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))))
+                frames = ego_video_capture.get_batch(range(int(FPS*anno['start_time']), int(FPS*anno['end_time']), sample_interval_to_frame)).asnumpy()
+                for fra in frames:
+                    distort_frame = self._distort_by_calibration(fra)
+                    images.append(Image.fromarray(distort_frame))
+                    images4sharp.append(distort_frame)
+                    
+                # for fra in range(int(FPS*anno['start_time']), int(FPS*anno['end_time']), sample_interval_to_frame):
+                    # ego_video_capture.set(cv2.CAP_PROP_POS_FRAMES, fra)
+                    # ret, frame = ego_video_capture.read()
+                    # assert ret
+                    # distort_frame = self._distort_by_calibration(frame.shape[0], frame.shape[1], frame)
+                    # images.append((Image.fromarray(cv2.cvtColor(distort_frame, cv2.COLOR_BGR2RGB))))
+                
+                # Do sharpness filter   
+                sharp_scores = self._calculate_sharp_score(images4sharp)    
                     
                 # Do clip similar selection
                 c_images = [self.preprocess(img) for img in images]
@@ -345,12 +387,14 @@ class EgoExo4d_Finetune_Dataset(Dataset):
                 with torch.no_grad():
                     logits_per_image, logits_per_text = self.model(c_images, c_text)
                     probs = logits_per_text.softmax(dim=-1).cpu().numpy()
-                    meaningful_image = images[probs.argmax()]
+                
+                total_score = probs + sharp_scores
+                meaningful_image = images[total_score.argmax()]
                 epi['egocentric_images'].append(meaningful_image)
                 epi['captions'].append(text)
             
-            for _, cap in video_captures.items():
-                cap.release()
+            # for _, cap in video_captures.items():
+            #     cap.release()
             
             ego_sp = os.path.join(tak_save_dir, 'egocentric_images')
             os.makedirs(ego_sp, exist_ok=True)
@@ -384,12 +428,24 @@ class EgoExo4d_Prerain_Dataset(Dataset):
                             - ego_rgb.png
     '''
     
-    def __init__(self, split='val', data_path='datasets/EgoExo4d', cooking_only=True, preprocess=False, input_processor=None, output_vis_processor=None, test=False) -> None:
+    def __init__(self, split='val', data_path='datasets/EgoExo4d', cooking_only=True, preprocess=False, input_processor=None, output_vis_processor=None, test=False, chunk=None, chunk_idx=None) -> None:
         self.episodes = []
         self._data_root_dir = data_path
         self._split = split
         self._cooking_only = cooking_only
         self.image_placehold = '<Img><ImageHere></Img>'
+        self._chunk = chunk
+        self._chunk_idx = chunk_idx
+        
+        # Ugly implementation for fisheye distortion
+        OUTPUT_FOV = 700
+        provider = data_provider.create_vrs_data_provider('datasets/EgoExo4d/example.vrs')
+        sensor_stream_id = provider.get_stream_id_from_label('camera-rgb')
+        image_data = provider.get_image_data_by_index(sensor_stream_id, 0)
+        device_calib = provider.get_device_calibration()
+        self._src_calib = device_calib.get_camera_calib('camera-rgb')
+        tmp_image_array = image_data[0].to_numpy_array()
+        self._dst_calib = calibration.get_linear_camera_calibration(tmp_image_array.shape[1], tmp_image_array.shape[0], OUTPUT_FOV, 'camera-rgb')
         
         if preprocess:
             self._load_neccesary_data()
@@ -511,11 +567,22 @@ class EgoExo4d_Prerain_Dataset(Dataset):
             for k,v in self.narrations.items():
                 self.narrations[k] = v[0]['descriptions']
     
+    def _distort_by_calibration(self, frame):
+        # distort image
+        rectified_array = calibration.distort_by_calibration(frame, self._dst_calib, self._src_calib, InterpolationMethod.BILINEAR)
+        
+        return rectified_array
+    
     def _preprocess_episodes_and_save(self):
         
         epi_save_dir = os.path.join(self._data_root_dir, 'preprocessed_episodes', self._split)
         
-        for take_name in tqdm(os.listdir(os.path.join(self._data_root_dir, 'takes')), desc='Loading takes'):
+        total_takes = os.listdir(os.path.join(self._data_root_dir, 'takes'))
+        total_takes.sort()
+        tasks_num_per_chunk = math.ceil(len(total_takes)/self._chunk)
+        total_takes = total_takes[self._chunk_idx*tasks_num_per_chunk:(self._chunk_idx+1)*tasks_num_per_chunk]
+        print(f'INFO: [ Chunk num: {self._chunk}, Chunk idx: {self._chunk_idx}, Process tasks num from {self._chunk_idx*tasks_num_per_chunk} to {(self._chunk_idx+1)*tasks_num_per_chunk} ]')
+        for take_name in tqdm(total_takes, desc='Loading takes'):
             if self._cooking_only and 'cooking' not in take_name:
                 continue
             take_p = os.path.join(self._data_root_dir, 'takes', take_name)
@@ -523,6 +590,12 @@ class EgoExo4d_Prerain_Dataset(Dataset):
             take_task = self.take_task[take_name]
             if os.path.exists(tak_save_dir):
                 continue
+            
+            # Load pretrain data : narrations and exocentric images
+            if not self.taskname_uid[take_name] in self.narrations:
+                print(f'INFO : [ {take_name} not in narrations ]')
+                continue
+            
             # os.makedirs(tak_save_dir, exist_ok=True)
             self.save_episodes = []
             
@@ -531,18 +604,24 @@ class EgoExo4d_Prerain_Dataset(Dataset):
             ## Filter slam left/right and et mp4
             filters = ['aria01_211-1.mp4', 'aria01_1201-1.mp4', 'aria01_1201-2.mp4']
             video_captures = {}
+            exo_views = []
             for mp4 in os.listdir(frame_aligned_videos_p):
                 if mp4 in filters:
                     continue
                 mp4_p = os.path.join(frame_aligned_videos_p, mp4)
                 video_name = mp4.split('.')[0] if not 'aria' in mp4 else 'ego_rgb'
                 # Cv2 capture or  decord reader
-                video_captures.update({video_name: cv2.VideoCapture(mp4_p)})
-                # video_captures.update({video_name: imageio.get_reader(mp4_p,'ffmpeg')})
+                # video_captures.update({video_name: cv2.VideoCapture(mp4_p)})
+                
+                with open(mp4_p, 'rb') as f:
+                    if 'ego' in video_name:
+                        video_captures.update({video_name: VideoReader(f, ctx=cpu(0))})
+                    else:
+                        tmp_reader = VideoReader(f, ctx=cpu(0))
+                        exo_views.append(Image.fromarray(tmp_reader[100].asnumpy()))
+                        del tmp_reader
             
-            # Load pretrain data : narrations and exocentric images
-            if not self.taskname_uid[take_name] in self.narrations:
-                continue
+            
             narrations = self.narrations[self.taskname_uid[take_name]]
             for na in tqdm(narrations,desc='Loading episode within a take'):
                 epi = {}
@@ -550,34 +629,36 @@ class EgoExo4d_Prerain_Dataset(Dataset):
                 ## and upper the first letter of the sentence
                 epi['caption'] = na['text'].replace(na['text'][:3], na['text'][2].upper())
                 for k,v in video_captures.items():
-                    FPS = v.get(cv2.CAP_PROP_FPS)
+                    # FPS = v.get(cv2.CAP_PROP_FPS)
+                    FPS = v.get_avg_fps()
                     frame_num = int(na['timestamp'] * FPS)
-                    v.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
-                    ret, frame = v.read()
-                    assert ret
-                    epi[k] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # v.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+                    # ret, frame = v.read()
+                    # assert ret
+                    # epi[k] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    frame = v[frame_num].asnumpy()
+                    if 'ego' in k :
+                        frame = self._distort_by_calibration(frame)
+                    epi[k] = Image.fromarray(frame)
                     
-                    # FPS = v.get_meta_data()['fps']
-                    # frame_num = int(na['timestamp'] * FPS)
-                    # datas = v.get_data(frame_num)
-                    # frame = Image.fromarray(datas)
-                    
-                    epi[k] = frame
                     epi['frame'] = frame_num
                 self.save_episodes.append(epi)   
             
-            for _, cap in video_captures.items():
-                cap.release()
+            # for _, cap in video_captures.items():
+            #     cap.release()
             
             for epi in tqdm(self.save_episodes, desc='Saving episode within a take'):
                 sp = os.path.join(tak_save_dir, str(epi['frame']))
                 os.makedirs(sp, exist_ok=True)
-                cv2.imwrite(os.path.join(sp, 'ego_rgb.png'), epi['ego_rgb'])
-                # epi['ego_rgb'].save(os.path.join(sp, 'ego_rgb.png'))    
-                for k,v in epi.items():
-                    if 'cam' in k:
-                        cv2.imwrite(os.path.join(sp, f'{k}.png'), v)
-                        # v.sava(os.path.join(sp, f'{k}.png'))
+                # cv2.imwrite(os.path.join(sp, 'ego_rgb.png'), epi['ego_rgb'])
+                epi['ego_rgb'].save(os.path.join(sp, 'ego_rgb.png'))   
+                # for k,v in epi.items():
+                #     if 'cam' in k:
+                #         # cv2.imwrite(os.path.join(sp, f'{k}.png'), v)
+                #         v.save(os.path.join(sp, f'{k}.png'))
+                for ci in range(len(exo_views)):
+                    exo_views[ci].save(os.path.join(sp, f'cam0{ci+1}.png'))
+                    
                 with open(os.path.join(sp, 'caption.json'), 'w') as f:
                     json.dump({'task':take_task,'caption':epi['caption']}, f)
 
@@ -724,6 +805,10 @@ class EgoExo4d_Prerain_Dataset(Dataset):
             return result
     
 if __name__ == '__main__':
-    # pretrain = EgoExo4d_Prerain_Dataset(split='val', preprocess=True)
     args = parse_args()
-    finetune = Epic_Kitchen_Text_Image_Pairs_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx, filter_frame=args.filter_frame)
+    if args.dataset == 'egoexo_pretrain':
+        pretrain_egoexo = EgoExo4d_Prerain_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx)
+    elif args.dataset == 'egoexo_finetune':
+        finetune_egoexo = EgoExo4d_Finetune_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx)
+    elif args.dataset == 'epic_finetune':
+        pretrain_epic = Epic_Kitchen_Text_Image_Pairs_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx, filter_frame=args.filter_frame)
