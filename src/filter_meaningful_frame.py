@@ -115,8 +115,108 @@ class Filter:
         pass
     
 if __name__ == '__main__':
-    args = parse_args()
-    assert args.chunk_id < args.chunk
-    print(args)
-    filter = Filter(args)
-    filter.filter_dataset()
+    # args = parse_args()
+    # assert args.chunk_id < args.chunk
+    # print(args)
+    # filter = Filter(args)
+    # filter.filter_dataset()
+    import cv2
+    import numpy as np
+    from projectaria_tools.core import data_provider, calibration
+    from projectaria_tools.core.calibration import CameraCalibration, CameraModelType
+    from projectaria_tools.core import data_provider, calibration
+    from projectaria_tools.core.image import InterpolationMethod
+    from projectaria_tools.core.sensor_data import TimeDomain, TimeQueryOptions
+    from projectaria_tools.core.stream_id import RecordableTypeId, StreamId
+    import numpy as np
+    from matplotlib import pyplot as plt
+    
+    provider = data_provider.create_vrs_data_provider('/project/pi_chuangg_umass_edu/chenpeihao/Projects/hongyanzhi/MiniGPT-5/datasets/sample.vrs')
+    
+    camera_name = "camera-rgb"
+    sensor_name = "camera-rgb"
+    sensor_stream_id = provider.get_stream_id_from_label(sensor_name)
+    image_data = provider.get_image_data_by_index(sensor_stream_id, 0)
+    image_array = image_data[0].to_numpy_array()
+    # input: retrieve image distortion
+    device_calib = provider.get_device_calibration()
+    src_calib = device_calib.get_camera_calib(sensor_name)
+
+    # create output calibration: a linear model of image size 512x512 and focal length 150
+    # Invisible pixels are shown as black.
+    dst_calib = calibration.get_linear_camera_calibration(512, 512, 150, camera_name)
+
+    # distort image
+    rectified_array = calibration.distort_by_calibration(image_array, dst_calib, src_calib, InterpolationMethod.BILINEAR)
+    
+    # class CameraModelType:
+    # """
+    # Enum that represents the type of camera projection model. See Linear.h, Spherical.h, KannalaBrandtK3.h and FisheyeRadTanThinPrism.h for details.
+    
+    # Members:
+    
+    #   KANNALA_BRANDT_K3 : Spherical + polynomial radial distortion up to 9-th order.
+    
+    #   FISHEYE624 : Spherical + polynomial radial distortion up to 11-th order + tangential distortion.
+    
+    #   SPHERICAL : Spherical projection, linear in angular space.
+    
+    #   LINEAR : Linear pinhole projection, unit plane points and camera pixels are linearly related.
+    # """
+
+    # class CameraCalibration:
+    # """
+    # A class that provides APIs for camera calibration, including extrinsics, intrinsics, and projection.
+    # """
+    # @typing.overload
+    # def __init__(self) -> None:
+    #     ...
+    # @typing.overload
+    # def __init__(self, arg0: str, arg1: CameraModelType, arg2: numpy.ndarray[numpy.float64[m, 1]], arg3: SE3, arg4: int, arg5: int, arg6: float | None, arg7: float, arg8: str) -> None:
+    #     """
+    #     Constructor with a list of parameters for CameraCalibration.
+    #       Args:
+    #         label: The label of the camera, e.g. "camera-slam-left".
+    #         projection_model_type The type of camera projection model, e.g. ModelType::Linear
+    #         T_Device_Camera: The extrinsics of camera in Device frame.
+    #         image_width: Width of camera image.
+    #         image_height: Height of camera image.
+    #         maybe_valid_radius: [optional] radius of a circular mask that represents the valid area on
+    #                 the camera's sensor plane. Pixels out of this circular region are considered invalid. Setting
+    #                 this to None means the entire sensor plane is valid.
+    #         max_solid_angle an angle theta representing the FOV cone of the camera. Rays out of
+    #                 [-theta, +theta] will be rejected during projection.
+    #     """
+    
+    
+    
+    # {"Calibrated":true,"Projection":{"Params":[1220.023996423738,1465.740842972049,1444.456400131055,0.3873017203659512,-0.3028693288398382,-0.4233073492385598,1.992695711098763,-2.275773876360815,0.7960163711144228,0.0002886837163548054,0.0002861485206749526,-0.0006876592045433987,0.0001215696733149477,-0.001279450308854052,0.0002554384029135424],"Description":"see FisheyeRadTanThinPrism.h","Name":"FisheyeRadTanThinPrism"},"T_Device_Camera":{"Translation":[-0.004473207879487903,-0.01184645971386183,-0.004889051154160274],"UnitQuaternion":[0.9413135313012251,[0.33344618193065784,0.037802929278451275,0.03624111040038306]]},"SerialNumber":"0450577b730611814401100000000000","Label":"camera-rgb"}
+    # label: camera-rgb, model name: Fisheye624, principal point: [714.296, 707.294], focal length: [610.01, 610.01], projection params: [610.01, 714.296, 707.294, 0.411036, -0.456468, 0.0383031, 1.29834, -1.77047, 0.654994, -7.92031e-05, 4.4207e-05, -0.000587384, 0.000564394, 0.000515795, 0.000235027], image size (w,h): [1408, 1408], T_Device_Camera:(translation:[-0.00400587, -0.0118698, -0.00441815], quaternion(x,y,z,w):[0.332484, 0.0339686, 0.0416556, 0.941576]), serialNumber:0450577b730401974401100000000000)
+    # load video by cv2.VideoCapture
+    cap = cv2.VideoCapture('/project/pi_chuangg_umass_edu/chenpeihao/Projects/hongyanzhi/MiniGPT-5/datasets/EgoExo4d/takes/fair_cooking_05_2/frame_aligned_videos/aria02_214-1.mp4')
+    ret, frame = cap.read()
+    
+    # 摄像机内部参数矩阵
+    K = np.array([[242.52078247070312, 0, 318.243408203125],
+                [0, 242.52078247070312, 240.81936645507812],
+                [0, 0, 1]])
+
+     # [[k_0: k_5]  {p_0 p_1} {s_0 s_1 s_2 s_3}]
+    D = np.array([-0.024876972660422325, 0.09810236096382141, -0.06655783951282501, 0.008734318427741528, 0.0025442445185035467, -0.0005746951792389154, -0.0003363479918334633, 1.1586302207433619e-05, -0.0005165732582099736, -5.950118065811694e-05, 0.00037607509875670075, -1.358488134428626e-05])
+    
+    # 2. _core_pybinds.calibration.CameraCalibration(arg0: str, arg1: _core_pybinds.calibration.CameraModelType, arg2: numpy.ndarray[numpy.float64[m, 1]], arg3: SE3, arg4: int, arg5: int, arg6: Optional[float], arg7: float, arg8: str)
+    sr_calib = CameraCalibration('camera-rgb', CameraModelType.FISHEYE624, D)
+    
+   
+
+    # 输入图像宽度和高度
+    image_width = frame.shape[1]
+    image_height = frame.shape[0]
+
+    # 初始化映射矩阵
+    mapx, mapy = cv2.fisheye.initUndistortRectifyMap(K, D, None, K, (image_width, image_height), cv2.CV_32FC1)
+    corrected_image = cv2.remap(frame, mapx, mapy, interpolation=cv2.INTER_LINEAR)
+    
+    cv2.imwrite('results/corrected_image.png', corrected_image)
+    cv2.imwrite('results/frame.png', frame)
+    

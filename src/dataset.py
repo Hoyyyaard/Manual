@@ -241,7 +241,6 @@ class EgoExo4d_Finetune_Dataset(Dataset):
         self._chunk = chunk
         self._chunk_idx = chunk_idx
         
-        
         if preprocess:
             self._device = "cuda" 
             self.model, self.preprocess = clip.load("ViT-B/32", device=self._device)
@@ -267,7 +266,6 @@ class EgoExo4d_Finetune_Dataset(Dataset):
                     # filter out non-essential segments
                     "key_frames" : [seg for seg in v['segments'] if seg['is_essential']]
                 }
-                
                 
     def _preprocess_episodes_and_save(self):
         SAMPLE_FRAME_NUM_PER_SECOND = 10
