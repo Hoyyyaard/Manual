@@ -27,7 +27,7 @@ python src/download_egoexo4d.py
 # download example.vrs from aliyunpan and move it to dataset/EgoExo4d (/minigpt5/example.vrs in aliyunpan)
 
 # preprocess egoexo4d pretrain dataset(ego-exos-text-task pairs)  >> datasets/EgoExo4d/preprocessed_episodes
-python src/dataset.py --preprocess --dataset egoexo_pretrain
+python src/dataset.py --preprocess --dataset egoexo_pretrain --split train --chunk 1 --chunk_idx 0
 
 # preprocess egoexo4d finetune dataset(ego-exos-subtasks-task episodes) >> datasets/EgoExo4d/preprocessed_episodes_finetune
-python src/dataset.py --preprocess --dataset egoexo_finetune
+python src/dataset.py --preprocess --dataset egoexo_finetune --split train --chunk 1 --chunk_idx 0
