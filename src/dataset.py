@@ -34,6 +34,7 @@ from projectaria_tools.core.stream_id import RecordableTypeId, StreamId
 import numpy as np
 from matplotlib import pyplot as plt
 from projectaria_tools.core.sophus import SE3
+from utils import KeyframeFilter, FisheyeDistortor
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Preprocess EgoExo4d dataset')
@@ -127,21 +128,7 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
         
         if preprocess:
             self._device = "cuda" 
-            self.model, self.preprocess = clip.load("ViT-B/32", device=self._device)
-            self._preprocess_episodes_and_save()
-    
-    def _calculate_sharp_score(self, images):
-        def np_softmax(x):
-            e_x = np.exp(x - np.max(x))  
-            return e_x / e_x.sum(axis=0)
-        scores = []
-        for img in images:
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-            blurred_image = cv2.GaussianBlur(img, (3, 3), 0)
-            laplacian_image = cv2.Laplacian(blurred_image, cv2.CV_64F)
-            sharpness = np.var(laplacian_image)
-            scores.append(sharpness)
-        return np_softmax(np.array(scores))
+            self.keyframe_filter = KeyframeFilter()
 
     def _preprocess_episodes_and_save(self):
         
@@ -180,38 +167,20 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
                     # FPS = vr.get_avg_fps() 
                     
                     sample_interval_to_frame = math.ceil(((stop_frame - start_frame)) / SAMPLE_FRAME_NUM_PER_VIDEO_CLIP)
-                    images = vr.get_batch(range(start_frame, stop_frame, sample_interval_to_frame)).asnumpy()
+                    images_np = vr.get_batch(range(start_frame, stop_frame, sample_interval_to_frame)).asnumpy()
                     # range_low = max(start_frame, middle_frame-int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
                     # range_high = min(stop_frame, middle_frame+int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
                     # images = vr.get_batch(range(range_low , range_high)).asnumpy()
                     
-                    # Do sharpness filter
-                    sharp_scores = self._calculate_sharp_score(images)
-                    # print(sharp_scores)
+                    images = [Image.fromarray((img)) for img in images_np]
                     
-                    images = [Image.fromarray((img)) for img in images]
+                    meaningful_image = self.keyframe_filter(images_np, images, text)
                     
-                    # save images and named as score
-                    # for ii,im in enumerate(images):
-                    #     im.save(os.path.join('results', f'{sharp_scores[ii]}.png'))
-                    
-                    # assert False
-                    meaningful_image_test = images[sharp_scores.argmax()]  
-                    
-                    # Do clip similar selection
-                    c_images = [self.preprocess(img) for img in images]
-                    c_images = torch.stack(c_images).to(self._device)
-                    c_text = clip.tokenize(text).to(self._device)
-                    with torch.no_grad():
-                        logits_per_image, logits_per_text = self.model(c_images, c_text)
-                        probs = logits_per_text.softmax(dim=-1).cpu().numpy()
-                        
-                    # Weight the two scores
-                    meaningful_image = images[(probs+sharp_scores).argmax()]   
                     # h_concat = Image.new('RGB', (meaningful_image.width * 2, meaningful_image.height))
                     # h_concat.paste(meaningful_image, (0, 0))
                     # h_concat.paste(meaningful_image_test, (meaningful_image.width, 0))
                     self.text_image_pairs.append({'text':text, 'image':meaningful_image})
+                    
             except Exception as e:
                 print(e)
                 continue
@@ -239,37 +208,13 @@ class EgoExo4d_Finetune_Dataset(Dataset):
         self._chunk = chunk
         self._chunk_idx = chunk_idx
         
-        # Ugly implementation for fisheye distortion
-        OUTPUT_FOV = 700
-        provider = data_provider.create_vrs_data_provider('datasets/EgoExo4d/example.vrs')
-        sensor_stream_id = provider.get_stream_id_from_label('camera-rgb')
-        image_data = provider.get_image_data_by_index(sensor_stream_id, 0)
-        device_calib = provider.get_device_calibration()
-        self._src_calib = device_calib.get_camera_calib('camera-rgb')
-        tmp_image_array = image_data[0].to_numpy_array()
-        self._dst_calib = calibration.get_linear_camera_calibration(tmp_image_array.shape[1], tmp_image_array.shape[0], OUTPUT_FOV, 'camera-rgb')
-        
         if preprocess:
             self._device = "cuda" 
-            self.model, self.preprocess = clip.load("ViT-B/32", device=self._device)
+            self.keyframe_filter = KeyframeFilter()
+            self.fisheye_distortor = FisheyeDistortor()
             self._load_neccesary_data()
             print('INFO: [ Preprocess episodes and save ]')
             self._preprocess_episodes_and_save()
-
-    def _calculate_sharp_score(self, images):
-        scores = []
-        for img in images:
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-            blurred_image = cv2.GaussianBlur(img, (3, 3), 0)
-            laplacian_image = cv2.Laplacian(blurred_image, cv2.CV_64F)
-            sharpness = np.var(laplacian_image)
-            scores.append(sharpness)
-        return np.array(scores)
-    
-    def _distort_by_calibration(self, frame):
-        rectified_array = calibration.distort_by_calibration(frame, self._dst_calib, self._src_calib, InterpolationMethod.BILINEAR)
-        
-        return rectified_array
     
     def _load_neccesary_data(self):
         with open(os.path.join(self._data_root_dir, 'takes.json'), 'r') as f:
@@ -366,7 +311,7 @@ class EgoExo4d_Finetune_Dataset(Dataset):
                 sample_interval_to_frame = int((delta_time * FPS) / sample_total_frame)
                 frames = ego_video_capture.get_batch(range(int(FPS*anno['start_time']), int(FPS*anno['end_time']), sample_interval_to_frame)).asnumpy()
                 for fra in frames:
-                    distort_frame = self._distort_by_calibration(fra)
+                    distort_frame = self.fisheye_distortor(fra)
                     images.append(Image.fromarray(distort_frame))
                     images4sharp.append(distort_frame)
                     
@@ -377,19 +322,8 @@ class EgoExo4d_Finetune_Dataset(Dataset):
                     # distort_frame = self._distort_by_calibration(frame.shape[0], frame.shape[1], frame)
                     # images.append((Image.fromarray(cv2.cvtColor(distort_frame, cv2.COLOR_BGR2RGB))))
                 
-                # Do sharpness filter   
-                sharp_scores = self._calculate_sharp_score(images4sharp)    
-                    
-                # Do clip similar selection
-                c_images = [self.preprocess(img) for img in images]
-                c_images = torch.stack(c_images).to(self._device)
-                c_text = clip.tokenize(text).to(self._device)
-                with torch.no_grad():
-                    logits_per_image, logits_per_text = self.model(c_images, c_text)
-                    probs = logits_per_text.softmax(dim=-1).cpu().numpy()
+                meaningful_image = self.keyframe_filter(images4sharp, images, text)
                 
-                total_score = probs + sharp_scores
-                meaningful_image = images[total_score.argmax()]
                 epi['egocentric_images'].append(meaningful_image)
                 epi['captions'].append(text)
             
@@ -436,19 +370,10 @@ class EgoExo4d_Prerain_Dataset(Dataset):
         self.image_placehold = '<Img><ImageHere></Img>'
         self._chunk = chunk
         self._chunk_idx = chunk_idx
-        
-        # Ugly implementation for fisheye distortion
-        OUTPUT_FOV = 700
-        provider = data_provider.create_vrs_data_provider('datasets/EgoExo4d/example.vrs')
-        sensor_stream_id = provider.get_stream_id_from_label('camera-rgb')
-        image_data = provider.get_image_data_by_index(sensor_stream_id, 0)
-        device_calib = provider.get_device_calibration()
-        self._src_calib = device_calib.get_camera_calib('camera-rgb')
-        tmp_image_array = image_data[0].to_numpy_array()
-        self._dst_calib = calibration.get_linear_camera_calibration(tmp_image_array.shape[1], tmp_image_array.shape[0], OUTPUT_FOV, 'camera-rgb')
-        
+
         if preprocess:
             self._load_neccesary_data()
+            self.fisheye_distortor = FisheyeDistortor()
             print('INFO: [ Preprocess episodes and save ]')
             self._preprocess_episodes_and_save()
             
@@ -567,12 +492,6 @@ class EgoExo4d_Prerain_Dataset(Dataset):
             for k,v in self.narrations.items():
                 self.narrations[k] = v[0]['descriptions']
     
-    def _distort_by_calibration(self, frame):
-        # distort image
-        rectified_array = calibration.distort_by_calibration(frame, self._dst_calib, self._src_calib, InterpolationMethod.BILINEAR)
-        
-        return rectified_array
-    
     def _preprocess_episodes_and_save(self):
         
         epi_save_dir = os.path.join(self._data_root_dir, 'preprocessed_episodes', self._split)
@@ -638,7 +557,7 @@ class EgoExo4d_Prerain_Dataset(Dataset):
                     # epi[k] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                     frame = v[frame_num].asnumpy()
                     if 'ego' in k :
-                        frame = self._distort_by_calibration(frame)
+                        frame = self.fisheye_distortor(frame)
                     epi[k] = Image.fromarray(frame)
                     
                     epi['frame'] = frame_num
