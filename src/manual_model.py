@@ -12,6 +12,7 @@ from lavis.models.blip2_models.blip2 import (
     compute_sim_matrix,
     disabled_train,
 )
+import random
 from minigpt4.models.mini_gpt5 import MiniGPT5, StoppingCriteriaList, StoppingCriteriaSub
 from model import MiniGPT5_Model
 from minigpt4.common.config import Config
@@ -34,7 +35,7 @@ class ManualMiniGPT5(MiniGPT5):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-    def forward(self, input_ids, labels, attention_mask, input_images=None, input_img_features=None, output_hidden_states=True, captions=None):
+    def forward(self, input_ids, labels, attention_mask, input_images=None, input_img_features=None, output_hidden_states=True, batch=None):
         '''
             Fork From: models.mini_gpt5.MiniGPT5.forward
             Modify: 
@@ -46,7 +47,7 @@ class ManualMiniGPT5(MiniGPT5):
             if input_img_features is not None:
                 wrapped_img_embeds, wrapped_atts_img, wrapped_labels = self.input_warp(input_ids[b:b+1], attention_mask[b:b+1], labels[b:b+1], input_image_feature=input_img_features[b])
             elif input_images is not None:
-                wrapped_img_embeds, wrapped_atts_img, wrapped_labels = self.input_warp(input_ids[b:b+1], attention_mask[b:b+1], labels[b:b+1], input_images[b], caption=captions[b])
+                wrapped_img_embeds, wrapped_atts_img, wrapped_labels = self.input_warp(input_ids[b:b+1], attention_mask[b:b+1], labels[b:b+1], input_images[b], caption=batch['task'][b])
 
             all_input_embeds.append(wrapped_img_embeds)
             all_attention.append(wrapped_atts_img)
@@ -278,7 +279,7 @@ class Manual_MiniGPT5_Model(MiniGPT5_Model, LightningModule):
 
             hidden_size = self.model.llama_model.config.hidden_size
 
-        sd_model_name = "stabilityai/stable-diffusion-2-1-base"
+        sd_model_name = "ckpts/huggingface/stable-diffusion-2-1-base"
 
         self.sd_text_encoder = CLIPTextModel.from_pretrained(sd_model_name, subfolder="text_encoder")
         self.sd_tokenizer = CLIPTokenizer.from_pretrained(sd_model_name, subfolder="tokenizer")
@@ -338,7 +339,7 @@ class Manual_MiniGPT5_Model(MiniGPT5_Model, LightningModule):
         if input_image is None:
             input_image = torch.zeros((1, 3, 224, 224), dtype=PRECISION).to(self.device)
         if type(utterance) == str:
-            utterance = [utterance]
+            utterance = [utterance] 
         llm_sample_outputs = self.model.predict(utterance, input_image, max_new_tokens=max_new_tokens, temperature=1.0, repetition_penalty=2.0, task_name=task_name, force_generation=force_generation, caption=caption)
         new_tokens = llm_sample_outputs['sequences'][0]
         pred_out = self.tokenizer.decode(new_tokens)
@@ -390,7 +391,7 @@ class Manual_MiniGPT5_Model(MiniGPT5_Model, LightningModule):
         output_image_feature = batch.get('output_image_feature', None)
 
         bs = len(source_text)
-        loss_dict = self(input_ids, attention_mask, input_images, output_image, labels, captions, input_images_feature, output_image_feature)
+        loss_dict = self(input_ids, attention_mask, input_images, output_image, labels, captions, input_images_feature, output_image_feature, batch=batch)
         loss = loss_dict['loss']
         log_dict = {f'train_{k}': v for k, v in loss_dict.items()}
         self.log_dict(log_dict, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=bs)
@@ -429,3 +430,82 @@ class Manual_MiniGPT5_Model(MiniGPT5_Model, LightningModule):
                     self.logger.log_table(key="sample", data=data, columns=columns)
                 self.train()
         return loss
+    
+    def validation_step(self, batch, batch_idx):
+        for key in batch.keys():
+            if type(batch[key]) == list:
+                batch[key] = batch[key]
+            else:
+                batch[key] = batch[key].to(self.device)
+
+        input_ids = batch['input_ids']
+        labels = batch['labels']
+        attention_mask = batch['attention_mask']
+        source_text = batch['source']
+        target_text = batch['target']
+        captions = batch['caption']
+        input_images = batch.get('input_images', None)
+        output_image = batch.get('output_image', None)
+        input_images_feature = batch.get('input_images_feature', None)
+        output_image_feature = batch.get('output_image_feature', None)
+
+        bs = len(source_text)
+        loss_dict = self(input_ids, attention_mask, input_images, output_image, labels, captions, input_images_feature, output_image_feature, batch=batch)
+        log_dict = {f'val_{k}': v for k, v in loss_dict.items()}
+        self.log_dict(log_dict, batch_size=bs, logger=True, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+
+
+    def forward(self, input_ids, attention_mask, input_images, output_image, labels, captions=None, input_images_feature=None, output_image_feature=None, batch=None):
+        '''
+            Fork From: model.MiniGPT5_Model.forward
+            Modify: 
+                1. Add captions input to self.model.forward function
+        '''
+        if self.encoder_model_config.model_type=='multimodal_encoder':
+            outputs, special_token_index = self.model(input_ids=input_ids, labels=labels, attention_mask=attention_mask, input_images=input_images, input_img_features=input_images_feature ,output_hidden_states=True, batch=batch)
+        text_loss = outputs['loss']
+        last_hidden_state = outputs['hidden_states'][-1]  # [bs, 32, 4096]
+        t2i_input_embedding = []
+        caption_feature = []
+        calculate_caption_loss = not any([c is None for c in captions])
+        for i in range(len(special_token_index)):
+            bs_id, seq_id = special_token_index[i]
+            # random set 10% data with empty text feature
+            if USE_CFG and random.random() < 0.1:
+                t2i_input_embedding.append(self.zero_img_feature)
+                if calculate_caption_loss:
+                    caption_feature.append(self.empty_text_feature)
+            else:
+                t2i_input_embedding.append(last_hidden_state[bs_id:bs_id+1, seq_id:seq_id+self.img_token_num, :]) # 8 voken fts
+                if calculate_caption_loss:
+                    caption_feature.append(self.encode_caption(captions[bs_id], self.sd_tokenizer.model_max_length, inference=True))
+
+        if len(t2i_input_embedding) == 0:
+            loss = 0.01 * text_loss
+            if calculate_caption_loss:
+                return {'loss': loss, 'text_loss': text_loss, 'image_loss': 0.0, 'caption_loss': 0.0}
+            else:
+                return {'loss': loss, 'text_loss': text_loss, 'image_loss': 0.0}
+        
+        else:
+            t2i_input_embedding = torch.cat(t2i_input_embedding, dim=0)
+            img_token_bs = t2i_input_embedding.shape[0]
+            t2i_input_embedding = self.fc(t2i_input_embedding)
+            mapping_feature = self.llm_to_t2i_mapping(src=t2i_input_embedding, tgt=self.t2i_decoder_prompt.repeat(img_token_bs, 1, 1))
+
+            if output_image_feature is None:
+                image_loss = self.compute_image_loss(mapping_feature, output_image[special_token_index[:, 0]])
+            else:
+                image_loss = self.compute_image_loss(mapping_feature, None, output_image_feature=output_image_feature[special_token_index[:, 0]])
+
+            if calculate_caption_loss: 
+                caption_feature = torch.cat(caption_feature, dim=0)
+                caption_loss = F.mse_loss(mapping_feature, caption_feature)
+
+                loss = 0.01 * text_loss + image_loss + 0.1 * caption_loss
+
+                return {'loss': loss, 'text_loss': text_loss, 'image_loss': image_loss, 'caption_loss': caption_loss}
+            else:
+                loss = 0.01 * text_loss + image_loss
+
+                return {'loss': loss, 'text_loss': text_loss, 'image_loss': image_loss}

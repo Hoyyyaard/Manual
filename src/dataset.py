@@ -34,7 +34,7 @@ from projectaria_tools.core.stream_id import RecordableTypeId, StreamId
 import numpy as np
 from matplotlib import pyplot as plt
 from projectaria_tools.core.sophus import SE3
-from utils import KeyframeFilter, FisheyeDistortor
+from src.utils import KeyframeFilter, FisheyeDistortor
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Preprocess EgoExo4d dataset')
@@ -362,7 +362,7 @@ class EgoExo4d_Prerain_Dataset(Dataset):
                             - ego_rgb.png
     '''
     
-    def __init__(self, split='val', data_path='datasets/EgoExo4d', cooking_only=True, preprocess=False, input_processor=None, output_vis_processor=None, test=False, chunk=None, chunk_idx=None) -> None:
+    def __init__(self, split='train', data_path='datasets/EgoExo4d', cooking_only=True, preprocess=False, input_processor=None, output_vis_processor=None, test=False, chunk=None, chunk_idx=None) -> None:
         self.episodes = []
         self._data_root_dir = data_path
         self._split = split
@@ -395,6 +395,7 @@ class EgoExo4d_Prerain_Dataset(Dataset):
         else:
             self.sources, self.targets, self.input_image_path, self.output_image_path = [], [], [], []
             self.caption, self.task_names = [], []
+            self.task = []
 
             system_prompt="You will be able to generate image according to command."
             generation_prompts = [
@@ -423,6 +424,7 @@ class EgoExo4d_Prerain_Dataset(Dataset):
                             with open(os.path.join(take_p, frame, cam), 'r') as f:
                                 data = json.load(f)
                                 step_caption = data['caption']
+                                step_task = data['task']
 
                     step_caption = self.pre_caption(step_caption)
                     # this_take_image_placehold = '<Img>' + self.image_placehold*len(input_image_path) + '</Img>'
@@ -432,8 +434,8 @@ class EgoExo4d_Prerain_Dataset(Dataset):
                     self.sources.append(caption_source)
                     self.targets.append(caption_target)
                     self.caption.append(step_caption)
-                    task = data['task']
-                    self.task_names.append(f'{take_name}_{frame}_{task}')
+                    self.task.append(step_task)
+                    self.task_names.append(f'{take_name}_{frame}_{step_task}')
                     self.input_image_path.append(input_image_path)
                     self.output_image_path.append(output_image_path)
                     
@@ -444,7 +446,8 @@ class EgoExo4d_Prerain_Dataset(Dataset):
                         self.sources.append(caption_source)
                         self.targets.append(caption_target)
                         self.caption.append(step_caption)
-                        self.task_names.append(f'{take_name}_{frame}_{task}_instruction')
+                        self.task.append(step_task)
+                        self.task_names.append(f'{take_name}_{frame}_{step_task}_instruction')
                         self.input_image_path.append(input_image_path)
                         self.output_image_path.append(output_image_path)
                     
@@ -611,6 +614,7 @@ class EgoExo4d_Prerain_Dataset(Dataset):
                     'output_image_path': self.output_image_path,
                     'caption': self.caption,
                     'task_names': self.task_names,
+                    'task': self.task
                     }
         torch.save(all_data, saved_file)
 
@@ -622,6 +626,7 @@ class EgoExo4d_Prerain_Dataset(Dataset):
         self.output_image_path = all_data['output_image_path'] # image path
         self.caption = all_data['caption']  # caption, the same as sources
         self.task_names = all_data['task_names']
+        self.task = all_data['task']
         del all_data
         if self.test:
             self.valid_idx = []
@@ -689,6 +694,7 @@ class EgoExo4d_Prerain_Dataset(Dataset):
 
         input_dict["caption"] = self.caption[i]
         input_dict["task_name"] = self.task_names[i]
+        input_dict["task"] = self.task[i]
         target_ids = self.input_processor(text = output_text, add_special_tokens=False)['input_ids']
         label = torch.ones_like(input_dict["input_ids"])*-100
         label = torch.cat((label, target_ids), dim=1)

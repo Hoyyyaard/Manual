@@ -8,14 +8,6 @@ from pathlib import Path
 import imageio
 from PIL import Image
 import sys
-# Abs file dir of this file
-current_file_path = os.path.abspath(__file__)
-# parent directory of this file
-parent_directory = os.path.dirname(current_file_path)
-base_dir = os.path.dirname(parent_directory)
-# print(base_dir)
-sys.path.append(base_dir)
-from constants import *
 import random
 import numpy as np
 import re
@@ -34,6 +26,7 @@ from projectaria_tools.core.stream_id import RecordableTypeId, StreamId
 import numpy as np
 from matplotlib import pyplot as plt
 from projectaria_tools.core.sophus import SE3
+import torch
 
 
 class FisheyeDistortor:
@@ -79,6 +72,7 @@ class KeyframeFilter:
         with torch.no_grad():
             logits_per_image, logits_per_text = self.model(c_images, c_text)
             probs = logits_per_text.softmax(dim=-1).cpu().numpy()
+        return probs
     
     def __call__(self, probs, sharp_scores, images_np, images_pil, text) -> Any:
         sharp_scores = self._calculate_sharp_score(images_np)
