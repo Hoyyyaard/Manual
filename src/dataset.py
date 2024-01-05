@@ -36,6 +36,8 @@ from matplotlib import pyplot as plt
 from projectaria_tools.core.sophus import SE3
 from src.utils import KeyframeFilter, FisheyeDistortor
 
+from debug.filter_frame import debug
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Preprocess EgoExo4d dataset')
     parser.add_argument('--data_path', type=str, default='datasets/EgoExo4d', help='Path to the dataset')
@@ -47,6 +49,7 @@ def parse_args():
     parser.add_argument('--dataset',choices=['egoexo_pretrain', 'egoexo_finetune', 'epic_pretrain'],required=True, help='Dataset to use')
     args = parser.parse_args()
     return args
+
 
 class Diffusion_Finetune_Dataset(Dataset):
     '''
@@ -129,6 +132,7 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
         if preprocess:
             self._device = "cuda" 
             self.keyframe_filter = KeyframeFilter()
+            self._preprocess_episodes_and_save()
 
     def _preprocess_episodes_and_save(self):
         
@@ -164,17 +168,20 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
                     stop_frame = narra['stop_frame']
                     middle_frame = narra['middle_frame']
                     text = narra['narrations']
-                    # FPS = vr.get_avg_fps() 
+                    FPS = vr.get_avg_fps() 
                     
                     sample_interval_to_frame = math.ceil(((stop_frame - start_frame)) / SAMPLE_FRAME_NUM_PER_VIDEO_CLIP)
+                    # sample_interval_to_frame = 1 
+                    # Mode: RGB
                     images_np = vr.get_batch(range(start_frame, stop_frame, sample_interval_to_frame)).asnumpy()
+
                     # range_low = max(start_frame, middle_frame-int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
                     # range_high = min(stop_frame, middle_frame+int(SAMPLE_FRAME_NUM_PER_VIDEO_CLIP/2))
                     # images = vr.get_batch(range(range_low , range_high)).asnumpy()
                     
                     images = [Image.fromarray((img)) for img in images_np]
                     
-                    meaningful_image = self.keyframe_filter(images_np, images, text)
+                    meaningful_image = self.keyframe_filter(images_np, images, text, FPS)
                     
                     # h_concat = Image.new('RGB', (meaningful_image.width * 2, meaningful_image.height))
                     # h_concat.paste(meaningful_image, (0, 0))
@@ -196,7 +203,7 @@ class Epic_Kitchen_Text_Image_Pairs_Dataset(Dataset):
                     # f.write('\n')
                     # f.write(str(tip[f'score2{SAMPLE_FRAME_NUM_PER_VIDEO_CLIP}']))
                 sbar.update(1)
-
+        
 
 class EgoExo4d_Finetune_Dataset(Dataset):
     def __init__(self, split='train', data_path='datasets/EgoExo4d', cooking_only=True, preprocess=False, input_processor=None, output_vis_processor=None, test=False, chunk=None, chunk_idx=None) -> None:
@@ -729,11 +736,12 @@ class EgoExo4d_Prerain_Dataset(Dataset):
             result.paste(pil_img, ((height - width) // 2, 0))
             return result
     
+
 if __name__ == '__main__':
     args = parse_args()
     if args.dataset == 'egoexo_pretrain':
         pretrain_egoexo = EgoExo4d_Prerain_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx)
     elif args.dataset == 'egoexo_finetune':
         finetune_egoexo = EgoExo4d_Finetune_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx)
-    elif args.dataset == 'epic_finetune':
-        pretrain_epic = Epic_Kitchen_Text_Image_Pairs_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx, filter_frame=args.filter_frame)
+    elif args.dataset == 'epic_pretrain':
+        pretrain_epic = Epic_Kitchen_Text_Image_Pairs_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx)

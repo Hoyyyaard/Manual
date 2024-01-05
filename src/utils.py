@@ -27,6 +27,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 from projectaria_tools.core.sophus import SE3
 import torch
+import av
 
 
 class FisheyeDistortor:
@@ -50,7 +51,9 @@ class KeyframeFilter:
     def __init__(self, device='cuda'):
         self._device = device
         self.model, self.preprocess = clip.load("ViT-B/32", device=self._device)
-        self._preprocess_episodes_and_save()
+        self.cache_video_path = 'results/cache_video'
+        os.makedirs(self.cache_video_path, exist_ok=True)
+        self.cache_video_path = os.path.join(self.cache_video_path, 'tmp.mp4')
         
     def _calculate_sharp_score(self, images:np.ndarray):
         def np_softmax(x):
@@ -58,7 +61,7 @@ class KeyframeFilter:
             return e_x / e_x.sum(axis=0)
         scores = []
         for img in images:
-            img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+            # img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
             blurred_image = cv2.GaussianBlur(img, (3, 3), 0)
             laplacian_image = cv2.Laplacian(blurred_image, cv2.CV_64F)
             sharpness = np.var(laplacian_image)
@@ -74,10 +77,48 @@ class KeyframeFilter:
             probs = logits_per_text.softmax(dim=-1).cpu().numpy()
         return probs
     
-    def __call__(self, probs, sharp_scores, images_np, images_pil, text) -> Any:
-        sharp_scores = self._calculate_sharp_score(images_np)
-        probs = self._clip_filter(images_pil, text)
-        # Weight the two scores
-        meaningful_image = images_pil[(probs+sharp_scores).argmax()]
+    def _extract_keyframes(self, images_np, FPS):
+        images_np = [cv2.cvtColor(img, cv2.COLOR_RGB2BGR) for img in images_np]
         
-        return meaningful_image
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        video = cv2.VideoWriter(self.cache_video_path, fourcc, FPS, images_np[0].shape[:2][::-1])
+        
+        for image in images_np:
+            video.write(image)
+        video.release()
+        
+        frames = []
+        frames_np = []
+        positions = [] 
+        with av.open(self.cache_video_path) as container:
+            # 表示我们只想查看关键帧
+            stream = container.streams.video[0]
+            avfps = stream.duration / stream.frames
+            stream.codec_context.skip_frame = 'NONKEY'
+            for frame in container.decode(stream):
+                # 使用frame.pts的原因是frame.index对skip_frame没有意义,因为关键帧是从所有的帧中抽取中独立的图像，而pts显示的就是这些独立图像的index；
+                # DTS（Decoding Time Stamp）：即解码时间戳，这个时间戳的意义在于告诉播放器该在什么时候解码这一帧的数据。
+                # PTS（Presentation Time Stamp）：即显示时间戳，这个时间戳用来告诉播放器该在什么时候显示这一帧的数据。
+                kframe = frame.to_image().convert('RGB')
+                kframe_np= frame.to_ndarray()
+                frames.append(kframe)
+                frames_np.append(kframe_np)
+                positions.append(int(frame.pts / avfps))
+        
+        os.system(f'rm {self.cache_video_path}')
+        
+        return frames, frames_np, positions
+    
+    def __call__(self, images_np, images_pil, text, FPS) -> Any:
+        
+        key_frames, key_frames_np, positions = self._extract_keyframes(images_np, FPS)
+        print(positions)
+        # if len(key_frames) > 1:
+        #     sharp_scores = self._calculate_sharp_score(key_frames_np)
+        #     probs = self._clip_filter(key_frames, text)
+        #     # Weight the two scores
+        #     meaningful_image = key_frames[(probs+sharp_scores).argmax()]
+        # else:
+        #     meaningful_image = key_frames[0]
+            
+        return key_frames[0]
