@@ -279,7 +279,7 @@ class Manual_MiniGPT5_Model(MiniGPT5_Model, LightningModule):
 
             hidden_size = self.model.llama_model.config.hidden_size
 
-        sd_model_name = "ckpts/huggingface/stable-diffusion-2-1-base"
+        sd_model_name = encoder_model_config.sd_pipeline
 
         self.sd_text_encoder = CLIPTextModel.from_pretrained(sd_model_name, subfolder="text_encoder")
         self.sd_tokenizer = CLIPTokenizer.from_pretrained(sd_model_name, subfolder="tokenizer")
@@ -408,6 +408,7 @@ class Manual_MiniGPT5_Model(MiniGPT5_Model, LightningModule):
                     i_image = input_images[0]
                 text_out, image_out = self.generate(utterance, i_image, caption=caption)
                 if image_out is not None:
+                    log_caption = caption.replace(' ','_')
                     if os.path.exists(tep:=os.path.join(OUTPUT_FOLDER,"train_eval")) == False:
                         os.makedirs(tep)
                     if IS_STAGE2:
@@ -418,12 +419,12 @@ class Manual_MiniGPT5_Model(MiniGPT5_Model, LightningModule):
                             predicted_images_nl = self.image_pipeline(prompt= captions[0]).images[0]
                             data = [[self.global_step, utterance, text_out, wandb.Image(image_out), captions[0], wandb.Image(predicted_images_nl)]]
                             columns = ["step", "input_utterance", "text_out", "img_out", "caption", "caption_out"]
-                            predicted_images_nl.save(os.path.join(OUTPUT_FOLDER, "train_eval", f'{self.global_step}_nl.png'))
+                            predicted_images_nl.save(os.path.join(OUTPUT_FOLDER, "train_eval", f'step{self.global_step}_nl_{log_caption}.png'))
                         else:
                             data = [[self.global_step, utterance, text_out, wandb.Image(image_out), gt_text]]
                             columns = ["step", "input_utterance", "text_out", "img_out", "gt_text"]
                     self.logger.log_table(key="sample", data=data, columns=columns)
-                    image_out.save(os.path.join(OUTPUT_FOLDER, "train_eval", f'{self.global_step}.png'))
+                    image_out.save(os.path.join(OUTPUT_FOLDER, "train_eval", f'step{self.global_step}_{log_caption}.png'))
                 else:
                     data = [[self.global_step, utterance, text_out, None, gt_text]]
                     columns = ["step", "input_utterance", "text_out", "img_out", "gt_text"]

@@ -1,26 +1,63 @@
 import json
 import os
 from tqdm import tqdm   
+import argparse
 
-os.system('egoexo -o datasets/EgoExo4d/ -y --part metadata --splits train val test')
+argparser = argparse.ArgumentParser()
+argparser.add_argument('--dataset', type=str, default='egoexo4d', choices=['egoexo4d', 'ego4d'])
+argparser.add_argument('--output_dir', required=True, type=str)
+args = argparser.parse_args()
 
-with open('datasets/EgoExo4d/takes.json', 'r') as f:
-    all_takes = json.load(f)
+opd = args.output_dir
 
-cooking_takes = []
-for take in tqdm(all_takes):
-    if 'cook' in take['take_name']:
-        cooking_takes.append(take['take_uid'])
+if args.dataset == 'egoexo4d':
 
-print('Cooking has {} takes'.format(len(cooking_takes)))
+    os.system(f'egoexo -o {opd} -y --part metadata --splits train val test')
 
-cooking_takes_str = ''
-for take in cooking_takes:
-    cooking_takes_str += take + ' '
+    with open(f'{opd}/takes.json', 'r') as f:
+        all_takes = json.load(f)
 
-# print(cooking_takes_str)
+    cooking_takes = []
+    for take in tqdm(all_takes):
+        if 'cook' in take['take_name']:
+            cooking_takes.append(take['take_uid'])
 
-command = f'egoexo -o datasets/EgoExo4d/ -y \
-            --parts takes annotations metadata trajectory \
-            --uids {cooking_takes_str}'
-os.system(command)
+    print('Cooking has {} takes'.format(len(cooking_takes)))
+
+    cooking_takes_str = ''
+    for take in cooking_takes:
+        cooking_takes_str += take + ' '
+
+    # print(cooking_takes_str)
+
+    command = f'egoexo -o {opd} -y \
+                --parts takes annotations metadata trajectory \
+                --uids {cooking_takes_str}'
+    os.system(command)
+
+else:
+    os.system(f'ego4d -o {opd} -y --dataset annotations')
+
+    with open(f'{opd}/ego4d.json', 'r') as f:
+        all_videos = json.load(f)['videos']
+
+    cooking_takes = []
+    for take in tqdm(all_videos):
+        if len(take['scenarios']) == 0 :
+            continue
+        for sc in take['scenarios']:
+            if 'Cooking' == sc and len(take['scenarios']) == 1:
+                cooking_takes.append(take['video_uid'])
+                break
+
+    print('Cooking has {} takes'.format(len(cooking_takes)))
+
+    cooking_takes_str = ''
+    for take in cooking_takes:
+        cooking_takes_str += take + ' '
+
+    # print(cooking_takes_str)
+
+    command = f'ego4d -o {opd} -y --datasets full_scale \
+                --video_uids {cooking_takes_str}'
+    os.system(command)

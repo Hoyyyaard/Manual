@@ -36,7 +36,6 @@ from matplotlib import pyplot as plt
 from projectaria_tools.core.sophus import SE3
 from src.utils import KeyframeFilter, FisheyeDistortor
 
-from debug.filter_frame import debug
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Preprocess EgoExo4d dataset')
@@ -550,6 +549,8 @@ class EgoExo4d_Prerain_Dataset(Dataset):
                         exo_views.append(Image.fromarray(tmp_reader[100].asnumpy()))
                         del tmp_reader
             
+            if len(video_captures.keys()) == 0:
+                continue
             
             narrations = self.narrations[self.taskname_uid[take_name]]
             for na in tqdm(narrations,desc='Loading episode within a take'):

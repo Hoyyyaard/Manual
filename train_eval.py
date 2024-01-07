@@ -44,6 +44,7 @@ class ModelArguments:
     model_save_name: Optional[str] = field(default="model_{epoch}-{step}")
     stage1_weight: Optional[str] = field(default=None)
     check_generate_step: Optional[int] = field(default=50)
+    sd_pipeline: Optional[str] = field(default="ckpts/huggingface/stable-diffusion-2-1-base")
 
 @dataclass
 class DataArguments:
