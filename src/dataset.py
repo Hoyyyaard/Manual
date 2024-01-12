@@ -8,6 +8,7 @@ from pathlib import Path
 import imageio
 from PIL import Image
 import sys
+import glob
 # Abs file dir of this file
 current_file_path = os.path.abspath(__file__)
 # parent directory of this file
@@ -55,16 +56,17 @@ class Diffusion_Finetune_Dataset(Dataset):
         This dataset will leverage different preprocessed dataset:
             1. EgoExo4d_Finetune_Dataset
     '''
-    def __init__(self, split='train', preprocess_func=None, dataset_list= ['epic']):
-        self.EgoExo4d_Finetune_dataset_path = os.path.join('datasets', 'EgoExo4d', 'preprocessed_episodes_finetune', split)
+    def __init__(self, split='train', preprocess_func=None, dataset_list= ['egoexo'], use_exo=True):
+        self.EgoExo4d_Pretrain_dataset_path = os.path.join('datasets', 'EgoExo4d', 'preprocessed_episodes', split)
         self.Epic_Kitchen_Text_Image_Pairs_dataset_path = os.path.join('datasets', 'epic-kitchen', 'text_image_pairs', split)
         self.preprocess_func = preprocess_func
         self.episodes = []
+        self.use_exo = use_exo
         
         if 'egoexo' in dataset_list:
-            print("Loading EgoExo4d_Finetune_Dataset..")
-            self.load_from_EgoExo4d_Finetune_Dataset()
-        if 'epic' in dataset_list:
+            print("Loading EgoExo4d_Pretrain_Dataset..")
+            self.load_from_EgoExo4d_Pretrain_Dataset()
+        if 'epic' in dataset_list and not use_exo:
             saved_data_path = os.path.join(self.Epic_Kitchen_Text_Image_Pairs_dataset_path, 'image_text_pairs.pkl')
             if os.path.exists(saved_data_path):
                 print("Loading saved data...")
@@ -84,18 +86,17 @@ class Diffusion_Finetune_Dataset(Dataset):
         all_data = {'episodes': self.episodes}
         torch.save(all_data, saved_file)
        
-    def load_from_EgoExo4d_Finetune_Dataset(self, ):
+    def load_from_EgoExo4d_Pretrain_Dataset(self, ):
         # Each episode will be in format {'image_path', 'caption'}
-        for task_name in tqdm(os.listdir(self.EgoExo4d_Finetune_dataset_path), desc='Loading EgoExo4d_Finetune_Dataset'):
-            take_path = os.path.join(self._dataset_path, task_name)
-            with open(os.path.join(take_path, 'caption.json'), 'r') as f:
-                data = json.load(f)
-                captions = data['captions'] 
-            image_paths = os.listdir(os.path.join(take_path, 'egocentric_images'))
-            assert len(captions) == len(image_paths)
-            image_paths = [os.path.join(os.path.join(take_path, 'egocentric_images'), p) for p in image_paths]
-            for pa, ca in zip(image_paths, captions):
-                self.episodes.append({'image_path':pa, 'caption':ca})
+        for task_name in tqdm(os.listdir(self.EgoExo4d_Pretrain_dataset_path), desc='Loading EgoExo4d_Pretrain_Dataset'):
+            take_path = os.path.join(self.EgoExo4d_Pretrain_dataset_path, task_name)
+            for frame_path in os.listdir(take_path):
+                with open(os.path.join(take_path, frame_path, 'caption.json'), 'r') as f:
+                    data = json.load(f)
+                    caption = data['caption']
+                image_path = os.path.join(take_path, frame_path, 'ego_rgb.png')
+                exo_path = glob.glob(os.path.join(take_path, frame_path, 'cam*.png'))
+                self.episodes.append({'image_path':image_path, 'caption':caption, 'exo_path':exo_path})
                 
     def load_from_Epic_Kitchen_Text_Image_Pairs_Dataset(self, ):
         for video_index in tqdm(os.listdir(self.Epic_Kitchen_Text_Image_Pairs_dataset_path), desc='Loading Epic_Kitchen_Text_Image_Pairs_Dataset'):
@@ -112,6 +113,22 @@ class Diffusion_Finetune_Dataset(Dataset):
         image = Image.open(image_p).convert("RGB")
         pixel_values, input_ids = self.preprocess_func(image, text)
         
+        if self.use_exo:
+            exo_path = self.episodes[i]['exo_path']
+            exo_images = []
+            for p in exo_path:
+                exo_images.append(Image.open(p).convert("RGB"))
+            exo_pixel_values = []
+            for exo in exo_images:
+                exo_pixel_values.append(self.preprocess_func(exo, text)[0])
+            exo_pixel_values = torch.stack(exo_pixel_values)
+            return {'pixel_values':pixel_values, 
+                    'input_ids':input_ids,
+                    'image':image,
+                    'text':text,
+                    'exo_pixel_values':exo_pixel_values,
+                    }
+
         return {'pixel_values':pixel_values, 
                 'input_ids':input_ids,
                 'image':image,
