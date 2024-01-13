@@ -17,5 +17,6 @@ export MODEL_NAME="timbrooks/instruct-pix2pix"
   --lr_warmup_steps=0 \
   --output_dir=results/diffusion/instrp2p_loop \
   --report_to=wandb \
+  --val \
   --resume_from_checkpoint latest \
    

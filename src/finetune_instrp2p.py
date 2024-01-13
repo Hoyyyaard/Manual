@@ -299,6 +299,11 @@ def parse_args():
         help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.",
     )
     parser.add_argument(
+        "--val",
+        action="store_true",
+        help="Whether or not to run validation during training.",
+    )
+    parser.add_argument(
         "--learning_rate",
         type=float,
         default=1e-4,
@@ -1177,7 +1182,7 @@ def main():
         
         if accelerator.is_main_process:
             if (
-                epoch % args.validation_epochs == 0
+                epoch % args.validation_epochs == 0 and args.val
             ):
                 logger.info(
                     f"Running validation... \n "
