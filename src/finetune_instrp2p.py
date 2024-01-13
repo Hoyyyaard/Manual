@@ -92,9 +92,9 @@ class Latent_Qformer(nn.Module):
         self.ln_vision = self.ln_vision.eval()
         self.ln_vision.train = disabled_train
 
-        # 64 querys & 768 vision fts dim
+        # 64 querys & 1408 vision fts dim
         self.qformer, self.query_tokens = Blip2Base.init_Qformer(64, 1408, vocab_size=vocab_size)
-        # 第一个卷积层：输入通道为512，输出通道为256，卷积核大小为3x3，填充为1
+        # 第一个卷积层：输入通道为768，输出通道为256，卷积核大小为3x3，填充为1
         self.conv1 = nn.Conv2d(768, 256, kernel_size=3, padding=1)
         # 第一个上采样层：使用反卷积操作，将特征图的尺寸增大2倍
         self.upsample1 = nn.ConvTranspose2d(256, 256, kernel_size=4, stride=2, padding=1)
@@ -128,7 +128,7 @@ class Latent_Qformer(nn.Module):
         )
         # Use only query output
         x = query_outputs.last_hidden_state[:, :query_tokens.shape[1], :]
-        x = x.reshape(-1, 768, 8, 8)
+        x = x.reshape(-1, 8, 8, 768).permute(0, 3, 1, 2)
         x = self.conv1(x)
         x = self.upsample1(x)
         x = self.conv2(x)
@@ -491,7 +491,7 @@ def parse_args():
     # default to using the same revision for the non-ema model if not specified
     if args.non_ema_revision is None:
         args.non_ema_revision = args.revision
-
+    os.environ["WANDB_DIR"] = args.output_dir
     return args
 
 
@@ -531,26 +531,27 @@ def main():
                 " use `--variant=non_ema` instead."
             ),
         )
-    logging_dir = os.path.join(args.output_dir, args.logging_dir)
-    accelerator_project_config = ProjectConfiguration(
-        total_limit=args.checkpoints_total_limit
-    )
-    accelerator = Accelerator(
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        mixed_precision=args.mixed_precision,
-        log_with=args.report_to,
-        project_dir=logging_dir,
-        project_config=accelerator_project_config,
-    )
-
-    generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
-
     if args.report_to == "wandb":
         if not is_wandb_available():
             raise ImportError(
                 "Make sure to install wandb if you want to use it for logging during training."
             )
-        import wandb
+        import wandb    
+    
+    logging_dir = os.path.join(args.output_dir, args.logging_dir)
+    accelerator_project_config = ProjectConfiguration(
+        total_limit=args.checkpoints_total_limit,
+        project_dir=logging_dir,
+    )
+    accelerator = Accelerator(
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        mixed_precision=args.mixed_precision,
+        log_with=args.report_to,
+        project_config=accelerator_project_config,
+    )
+
+    generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
+
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -621,7 +622,7 @@ def main():
         revision=args.non_ema_revision,
     )
 
-    latent_qformer = Latent_Qformer(vocab_size=tokenizer.vocab_size)
+    # latent_qformer = Latent_Qformer(vocab_size=tokenizer.vocab_size)
 
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
@@ -893,11 +894,13 @@ def main():
         if args.use_exo:
             exo_pixel_values = torch.stack([example["exo_pixel_values"] for example in examples])
         pixel_values = torch.stack([example["pixel_values"] for example in examples])
+        original_pixel_values = torch.stack([example["original_pixel_values"] for example in examples])
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
         input_ids = torch.cat([example["input_ids"] for example in examples])
         text = [example['text'] for example in examples]
         image = [example['image'] for example in examples]
-        return {"edited_pixel_values": pixel_values, "input_ids": input_ids, 'image':image, 'text':text, 'exo_pixel_values':exo_pixel_values}
+        origin_image = [example['original_image'] for example in examples]
+        return {"edited_pixel_values": pixel_values, "input_ids": input_ids, 'image':image, 'original_image':origin_image, 'text':text, 'exo_pixel_values':exo_pixel_values, 'original_pixel_values':original_pixel_values}
     
     def preprocess_func(image, text):
         return train_transforms(image), tokenize_captions(text)
@@ -932,10 +935,13 @@ def main():
     )
 
     # Prepare everything with our `accelerator`.
-    unet, latent_qformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, latent_qformer, optimizer, train_dataloader, lr_scheduler
+    # unet, latent_qformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+    #     unet, latent_qformer, optimizer, train_dataloader, lr_scheduler
+    # )
+    unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        unet, optimizer, train_dataloader, lr_scheduler
     )
-
+    
     if args.use_ema:
         ema_unet.to(accelerator.device)
 
@@ -963,7 +969,7 @@ def main():
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
-        accelerator.init_trackers("instruct-pix2pix-cartoonizer", config=vars(args))
+        accelerator.init_trackers("instruct-pix2pix", config=vars(args))
 
     # Train!
     total_batch_size = (
@@ -992,7 +998,7 @@ def main():
             # Get the most recent checkpoint
             dirs = os.listdir(args.output_dir)
             dirs = [d for d in dirs if d.startswith("checkpoint")]
-            dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
+            # dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
             path = dirs[-1] if len(dirs) > 0 else None
 
         if path is None:
@@ -1020,9 +1026,10 @@ def main():
 
     for epoch in range(first_epoch, args.num_train_epochs):
         unet.train()
-        latent_qformer.train()
+        # latent_qformer.train()
         train_loss = 0.0
         for step, batch in enumerate(train_dataloader):
+            # latent_qformer.train()
             # Skip steps until we reach the resumed step
             if (
                 args.resume_from_checkpoint
@@ -1065,11 +1072,11 @@ def main():
                 # Get the additional image embedding for conditioning.
                 # Instead of getting a diagonal Gaussian here, we simply take the mode.
                 
-                # TODO: Replace the original image embedding with qformer output.
-                # original_image_embeds = vae.encode(
-                #     batch["original_pixel_values"].to(weight_dtype)
-                # ).latent_dist.mode()
-                original_image_embeds = latent_qformer(batch['exo_pixel_values'], batch['input_ids'])
+                
+                original_image_embeds = vae.encode(
+                    batch["original_pixel_values"].to(weight_dtype)
+                ).latent_dist.mode()
+                # original_image_embeds = latent_qformer(batch['exo_pixel_values'], batch['input_ids'])
 
                 # Conditioning dropout to support classifier-free guidance during inference. For more details
                 # check out the section 3.2.1 of the original paper https://arxiv.org/abs/2211.09800.
@@ -1130,7 +1137,10 @@ def main():
                 # Backpropagate
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
+                    if accelerator.num_processes == 1:
+                        accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
+                    else:
+                        accelerator.clip_grad_norm_(unet.module.parameters(), args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -1138,47 +1148,52 @@ def main():
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 if args.use_ema:
-                    ema_unet.step(unet.parameters())
+                    if accelerator.num_processes == 1:
+                        ema_unet.step(unet.parameters())
+                    else:
+                        ema_unet.step(unet.module.parameters())
                 progress_bar.update(1)
                 global_step += 1
                 accelerator.log({"train_loss": train_loss}, step=global_step)
                 train_loss = 0.0
 
-                if global_step % args.checkpointing_steps == 0:
-                    if accelerator.is_main_process:
-                        save_path = os.path.join(
-                            args.output_dir, f"checkpoint-{global_step}"
-                        )
-                        accelerator.save_state(save_path)
-                        logger.info(f"Saved state to {save_path}")
-
             logs = {
                 "step_loss": loss.detach().item(),
                 "lr": lr_scheduler.get_last_lr()[0],
+                "epoch": epoch
             }
             progress_bar.set_postfix(**logs)
 
             if global_step >= args.max_train_steps:
                 break
-
+        
+        if epoch % args.checkpointing_steps == 0:
+            if accelerator.is_main_process:
+                save_path = os.path.join(
+                    args.output_dir, f"checkpoint-{global_step}"
+                )
+                accelerator.save_state(save_path)
+                logger.info(f"Saved state to {save_path}")
+        
         if accelerator.is_main_process:
             if (
-                (args.val_image_url is not None)
-                and (args.validation_prompt is not None)
-                and (epoch % args.validation_epochs == 0)
+                epoch % args.validation_epochs == 0
             ):
                 logger.info(
-                    f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
-                    f" {args.validation_prompt}."
+                    f"Running validation... \n "
                 )
                 # create pipeline
                 if args.use_ema:
                     # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
-                    ema_unet.store(unet.parameters())
-                    ema_unet.copy_to(unet.parameters())
+                    if accelerator.num_processes == 1:
+                        ema_unet.store(unet.parameters())
+                        ema_unet.copy_to(unet.parameters())
+                    else:
+                        ema_unet.store(unet.module.parameters())
+                        ema_unet.copy_to(unet.module.parameters())
                 pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
                     args.pretrained_model_name_or_path,
-                    unet=unet,
+                    unet=unet if accelerator.num_processes == 1 else unet.module,
                     revision=args.revision,
                     torch_dtype=weight_dtype,
                 )
@@ -1186,23 +1201,37 @@ def main():
                 pipeline.set_progress_bar_config(disable=True)
 
                 # run inference
-                original_image = download_image(args.val_image_url)
+                # latent_qformer.eval()
                 edited_images = []
+                texts = []
                 with torch.autocast(
-                    str(accelerator.device),
+                    'cuda',
                     enabled=accelerator.mixed_precision == "fp16",
                 ):
-                    for _ in range(args.num_validation_images):
-                        edited_images.append(
-                            pipeline(
-                                args.validation_prompt,
-                                image=original_image,
-                                num_inference_steps=20,
-                                image_guidance_scale=1.5,
-                                guidance_scale=7,
-                                generator=generator,
-                            ).images[0]
-                        )
+                    with torch.no_grad():
+                        for bn in tqdm(range(len(batch['text'][:10])), desc="Generating val images"):
+                            # latent = latent_qformer(batch['exo_pixel_values'][bn].unsqueeze(0), batch['input_ids'][bn].unsqueeze(0))
+                            # original_image = pipeline.numpy_to_pil(pipeline.decode_latents(latent))[0]
+                            original_image = batch['original_image'][bn]
+                            edited_image = (
+                                pipeline(
+                                    batch['text'][bn],
+                                    image=original_image,
+                                    num_inference_steps=20,
+                                    image_guidance_scale=1.5,
+                                    guidance_scale=7,
+                                    generator=generator,
+                                ).images[0]
+                            )
+                            h_concat = PIL.Image.new('RGB', (edited_image.width * 2, edited_image.height))
+                            h_concat.paste(original_image, (0, 0))
+                            h_concat.paste(edited_image, (edited_image.width, 0))
+                            edited_images.append(h_concat)
+                            texts.append(batch['text'][bn])
+                #  Log images to disk
+                for img, prompt in zip(edited_images, texts):
+                    os.makedirs(os.path.join(args.output_dir, 'vis', f'epoch[{epoch}]_step[{step}]'), exist_ok=True)
+                    img.save(os.path.join(args.output_dir, 'vis', f'epoch[{epoch}]_step[{step}]', f"{prompt.replace(' ', '_')}.png"))            
 
                 for tracker in accelerator.trackers:
                     if tracker.name == "wandb":
@@ -1216,7 +1245,10 @@ def main():
                         tracker.log({"validation": wandb_table})
                 if args.use_ema:
                     # Switch back to the original UNet parameters.
-                    ema_unet.restore(unet.parameters())
+                    if accelerator.num_processes == 1:
+                        ema_unet.restore(unet.parameters())
+                    else:
+                        ema_unet.restore(unet.module.parameters())
 
                 del pipeline
                 torch.cuda.empty_cache()
@@ -1226,13 +1258,16 @@ def main():
     if accelerator.is_main_process:
         unet = accelerator.unwrap_model(unet)
         if args.use_ema:
-            ema_unet.copy_to(unet.parameters())
+            if accelerator.num_processes == 1:
+                ema_unet.copy_to(unet.parameters())
+            else:
+                ema_unet.copy_to(unet.module.parameters())
 
         pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
             args.pretrained_model_name_or_path,
             text_encoder=text_encoder,
             vae=vae,
-            unet=unet,
+            unet=unet if accelerator.num_processes == 1 else unet.module,
             revision=args.revision,
         )
         pipeline.save_pretrained(args.output_dir)

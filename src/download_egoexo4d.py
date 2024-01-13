@@ -31,7 +31,7 @@ if args.dataset == 'egoexo4d':
     # print(cooking_takes_str)
 
     command = f'egoexo -o {opd} -y \
-                --parts takes annotations metadata trajectory \
+                --parts takes  \
                 --uids {cooking_takes_str}'
     os.system(command)
 

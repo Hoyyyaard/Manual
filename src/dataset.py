@@ -125,8 +125,10 @@ class Diffusion_Finetune_Dataset(Dataset):
             return {'pixel_values':pixel_values, 
                     'input_ids':input_ids,
                     'image':image,
+                    'original_image':exo_images[0],
                     'text':text,
                     'exo_pixel_values':exo_pixel_values,
+                    'original_pixel_values':exo_pixel_values[0],
                     }
 
         return {'pixel_values':pixel_values, 
