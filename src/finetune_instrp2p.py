@@ -1235,9 +1235,10 @@ def main():
                                     generator=generator,
                                 ).images[0]
                             )
-                            h_concat = PIL.Image.new('RGB', (edited_image.width * 2, edited_image.height))
+                            h_concat = PIL.Image.new('RGB', (edited_image.width * 3, edited_image.height))
                             h_concat.paste(original_image, (0, 0))
                             h_concat.paste(edited_image, (edited_image.width, 0))
+                            h_concat.paste(batch['image'][bn], (edited_image.width*2, 0))
                             edited_images.append(h_concat)
                             texts.append(batch['text'][bn])
                 #  Log images to disk
