@@ -9,16 +9,14 @@ ulimit -n 102400
   --gradient_checkpointing \
   --mixed_precision="fp16" \
   --use_exo \
-  --checkpointing_steps 5 \
+  --checkpointing_steps 10 \
   --validation_epochs 5 \
   --max_train_steps=15000 \
   --learning_rate=1e-05 \
-  --max_grad_norm=1 \
   --max_grad_norm=1 \
   --lr_scheduler="constant" \
   --lr_warmup_steps=0 \
   --output_dir=$1 \
   --report_to=tensorboard \
-  --val \
   --resume_from_checkpoint latest \
    

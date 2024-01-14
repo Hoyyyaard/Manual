@@ -1,7 +1,8 @@
-OUTPUT=results/instrp2p/
-SCRIPT=${1:-"~/x64/anaconda3/envs/manual/bin/python src/ControlNet/tutorial_train_sd21.py"}
-NUM_GPUS_PER_NODE=${2:-2}
-NUM_NODES=${3:-8}
+export HOME=/gpfs/u/home/AICD/AICDzhnf/scratch/
+NP=4
+SCRIPT=${1:-"scripts/aimos/controlnet_finetune.sh ${NP}"}
+NUM_GPUS_PER_NODE=${2:-4}
+NUM_NODES=${3:-1}
 JOB_ID=${4:-"contorlnet"}
 LOOP_COUNTER=0
 

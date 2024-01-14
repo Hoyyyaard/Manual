@@ -16,10 +16,12 @@ base_dir = os.path.dirname(parent_directory)
 # print(base_dir)
 sys.path.append(base_dir)
 from src.dataset import ControlNet_Finetune_Dataset
+NP = os.getenv("NP", 1)
 
-
+opd = 'results/ControlNet/finetune_sd21'
+import torch
 # Configs
-resume_path = 'src/ControlNet/models/control_sd21_ini.ckpt'
+
 batch_size = 4
 logger_freq = 200
 learning_rate = 1e-5
@@ -29,7 +31,22 @@ only_mid_control = False
 
 # First use cpu to load models. Pytorch Lightning will automatically move it to GPUs.
 model = create_model('src/ControlNet/models/cldm_v21.yaml').cpu()
-model.load_state_dict(load_state_dict(resume_path, location='cpu'))
+
+if torch.cuda.current_device() == 0:
+    if os.path.exists(opd):
+        versions = os.listdir(os.path.join(opd, 'lightning_logs'))
+        versions.sort(key=lambda x: int(x.split('_')[-1]), reverse=True)
+        ckpts = os.listdir(os.path.join(opd, 'lightning_logs', versions[0], 'checkpoints'))
+        ckpts.sort(key=lambda x: int(x.split('-')[-1].split('=')[-1].split('.')[0]), reverse=True)
+        resume_path = os.path.join(opd, 'lightning_logs', versions[0], 'checkpoints', ckpts[0])
+        
+    else:
+        resume_path = 'src/ControlNet/models/control_sd21_ini.ckpt'
+
+    print('Resume from: ', resume_path)
+
+    model.load_state_dict(load_state_dict(resume_path, location='cpu'))
+
 model.learning_rate = learning_rate
 model.sd_locked = sd_locked
 model.only_mid_control = only_mid_control
@@ -39,7 +56,7 @@ model.only_mid_control = only_mid_control
 dataset = ControlNet_Finetune_Dataset()
 dataloader = DataLoader(dataset, num_workers=0, batch_size=batch_size, shuffle=False)
 logger = ImageLogger(batch_frequency=logger_freq)
-trainer = pl.Trainer(gpus=1, precision=16, callbacks=[logger], enable_checkpointing=True, accumulate_grad_batches=4, default_root_dir='results/ControlNet/finetune_sd21')
+trainer = pl.Trainer(gpus=NP, precision=16, callbacks=[logger, pl.callbacks.ModelCheckpoint(every_n_train_steps=500, save_top_k=-1)], enable_checkpointing=True, accumulate_grad_batches=1, default_root_dir=opd, strategy="ddp")
 
 
 # Train!

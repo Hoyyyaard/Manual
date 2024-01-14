@@ -1,4 +1,5 @@
-SCRIPT=${1:-"scripts/controlnet_finetune.sh"}
+NP=2
+SCRIPT=${1:-"scripts/umass/controlnet_finetune.sh ${NP}"}
 NUM_GPUS_PER_NODE=${2:-2}
 NUM_NODES=${3:-1}
 JOB_ID=${4:-"controlnet"}

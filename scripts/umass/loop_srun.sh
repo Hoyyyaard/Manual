@@ -1,4 +1,4 @@
-SCRIPT=${1:-"scripts/instrp2p_finetune.sh"}
+SCRIPT=${1:-"scripts/umass/instrp2p_finetune.sh"}
 NUM_GPUS_PER_NODE=${2:-2}
 NUM_NODES=${3:-1}
 JOB_ID=${4:-"instrp2p"}
