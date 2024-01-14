@@ -1202,7 +1202,11 @@ def main():
                     revision=args.revision,
                     torch_dtype=weight_dtype,
                 )
-                pipeline = pipeline.to(accelerator.device)
+                # Deal with the issue oom
+                device = accelerator.device
+                if accelerator.num_processes < torch.cuda.device_count():
+                    device = torch.device(f"cuda:{torch.cuda.device_count()-1}")
+                pipeline = pipeline.to(device)
                 pipeline.set_progress_bar_config(disable=True)
 
                 # run inference
@@ -1217,7 +1221,7 @@ def main():
                         for bn in tqdm(range(len(batch['text'][:10])), desc="Generating val images"):
                             # latent = latent_qformer(batch['exo_pixel_values'][bn].unsqueeze(0), batch['input_ids'][bn].unsqueeze(0))
                             # original_image = pipeline.numpy_to_pil(pipeline.decode_latents(latent))[0]
-                            original_image = batch['original_image'][bn]
+                            original_image = batch['original_image'][bn].to(device)
                             edited_image = (
                                 pipeline(
                                     batch['text'][bn],
@@ -1235,8 +1239,8 @@ def main():
                             texts.append(batch['text'][bn])
                 #  Log images to disk
                 for img, prompt in zip(edited_images, texts):
-                    os.makedirs(os.path.join(args.output_dir, 'vis', f'epoch[{epoch}]_step[{step}]'), exist_ok=True)
-                    img.save(os.path.join(args.output_dir, 'vis', f'epoch[{epoch}]_step[{step}]', f"{prompt.replace(' ', '_')}.png"))            
+                    os.makedirs(os.path.join(args.output_dir, 'vis', f'epoch[{epoch}]_step[{global_step}]'), exist_ok=True)
+                    img.save(os.path.join(args.output_dir, 'vis', f'epoch[{epoch}]_step[{global_step}]', f"{prompt.replace(' ', '_')}.png"))            
 
                 for tracker in accelerator.trackers:
                     if tracker.name == "wandb":

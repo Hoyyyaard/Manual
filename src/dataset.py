@@ -50,6 +50,67 @@ def parse_args():
     args = parser.parse_args()
     return args
 
+class ControlNet_Finetune_Dataset(Dataset):
+    def __init__(self, split='train', use_exo=True, preprocess_func=None):
+        self.EgoExo4d_Pretrain_dataset_path = os.path.join('datasets', 'EgoExo4d', 'preprocessed_episodes', split)
+        self.use_exo = use_exo
+        self.preprocess_func = preprocess_func
+        self.episodes = []
+        
+        saved_data_path = os.path.join(self.EgoExo4d_Pretrain_dataset_path, 'image_text_pairs_control.pkl')
+        if os.path.exists(saved_data_path):
+            print("Loading saved data...")
+            self.recover_data(saved_data_path)
+            print("Loaded saved data for EgoExo4d_Pretrain_Dataset!")
+        else:
+            print("Loading EgoExo4d_Pretrain_Dataset..")
+            self.load_from_EgoExo4d_Pretrain_Dataset()
+            self.save_process_data(saved_data_path)
+        
+    def __len__(self):
+        return len(self.episodes)
+
+    def load_from_EgoExo4d_Pretrain_Dataset(self, ):
+        # Each episode will be in format {'image_path', 'caption'}
+        for task_name in tqdm(os.listdir(self.EgoExo4d_Pretrain_dataset_path), desc='Loading EgoExo4d_Pretrain_Dataset'):
+            take_path = os.path.join(self.EgoExo4d_Pretrain_dataset_path, task_name)
+            for frame_path in os.listdir(take_path):
+                with open(os.path.join(take_path, frame_path, 'caption.json'), 'r') as f:
+                    data = json.load(f)
+                    caption = data['caption']
+                image_path = os.path.join(take_path, frame_path, 'ego_rgb.png')
+                exo_path = glob.glob(os.path.join(take_path, frame_path, 'cam*.png'))
+                self.episodes.append({'image_path':image_path, 'caption':caption, 'exo_path':exo_path})
+    
+    def recover_data(self, saved_file):
+        all_data = torch.load(saved_file)
+        self.episodes = all_data['episodes']
+        del all_data
+        
+    def save_process_data(self, saved_file):
+        all_data = {'episodes': self.episodes}
+        torch.save(all_data, saved_file)
+    
+    def __getitem__(self, idx):
+        item = self.episodes[idx]
+
+        source = cv2.imread(item['exo_path'][0])
+        target = cv2.imread(item['image_path'])
+        prompt = item['caption']
+
+        # Do not forget that OpenCV read images in BGR order.
+        source = cv2.cvtColor(source, cv2.COLOR_BGR2RGB)
+        source = cv2.resize(source, target.shape[:2][::-1])
+        target = cv2.cvtColor(target, cv2.COLOR_BGR2RGB)
+
+        # Normalize source images to [0, 1].
+        source = source.astype(np.float32) / 255.0
+
+        # Normalize target images to [-1, 1].
+        target = (target.astype(np.float32) / 127.5) - 1.0
+
+        return dict(jpg=target, txt=prompt, hint=source)
+    
 
 class Diffusion_Finetune_Dataset(Dataset):
     '''
@@ -64,8 +125,15 @@ class Diffusion_Finetune_Dataset(Dataset):
         self.use_exo = use_exo
         
         if 'egoexo' in dataset_list:
-            print("Loading EgoExo4d_Pretrain_Dataset..")
-            self.load_from_EgoExo4d_Pretrain_Dataset()
+            saved_data_path = os.path.join(self.EgoExo4d_Pretrain_dataset_path, 'image_text_pairs.pkl')
+            if os.path.exists(saved_data_path):
+                print("Loading saved data...")
+                self.recover_data(saved_data_path)
+                print("Loaded saved data for EgoExo4d_Pretrain_Dataset!")
+            else:
+                print("Loading EgoExo4d_Pretrain_Dataset..")
+                self.load_from_EgoExo4d_Pretrain_Dataset()
+                self.save_process_data(saved_data_path)
         if 'epic' in dataset_list and not use_exo:
             saved_data_path = os.path.join(self.Epic_Kitchen_Text_Image_Pairs_dataset_path, 'image_text_pairs.pkl')
             if os.path.exists(saved_data_path):
@@ -548,6 +616,8 @@ class EgoExo4d_Prerain_Dataset(Dataset):
             
             # Load video captures
             frame_aligned_videos_p = os.path.join(take_p, 'frame_aligned_videos')
+            if not os.path.exists(frame_aligned_videos_p):
+                continue
             ## Filter slam left/right and et mp4
             filters = ['aria01_211-1.mp4', 'aria01_1201-1.mp4', 'aria01_1201-2.mp4']
             video_captures = {}
