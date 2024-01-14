@@ -57,7 +57,7 @@ class ControlNet_Finetune_Dataset(Dataset):
         self.preprocess_func = preprocess_func
         self.episodes = []
         
-        saved_data_path = os.path.join(self.EgoExo4d_Pretrain_dataset_path, 'image_text_pairs_control.pkl')
+        saved_data_path = os.path.join('datasets', 'EgoExo4d', 'save_data', f'image_text_pairs_{split}_exo_control.pkl')
         if os.path.exists(saved_data_path):
             print("Loading saved data...")
             self.recover_data(saved_data_path)
@@ -125,7 +125,7 @@ class Diffusion_Finetune_Dataset(Dataset):
         self.use_exo = use_exo
         
         if 'egoexo' in dataset_list:
-            saved_data_path = os.path.join(self.EgoExo4d_Pretrain_dataset_path, 'image_text_pairs.pkl')
+            saved_data_path = os.path.join('datasets', 'EgoExo4d', 'save_data', f'image_text_pairs_{split}_sd_exo.pkl')
             if os.path.exists(saved_data_path):
                 print("Loading saved data...")
                 self.recover_data(saved_data_path)
@@ -135,7 +135,7 @@ class Diffusion_Finetune_Dataset(Dataset):
                 self.load_from_EgoExo4d_Pretrain_Dataset()
                 self.save_process_data(saved_data_path)
         if 'epic' in dataset_list and not use_exo:
-            saved_data_path = os.path.join(self.Epic_Kitchen_Text_Image_Pairs_dataset_path, 'image_text_pairs.pkl')
+            saved_data_path = os.path.join('datasets', 'EgoExo4d', 'save_data', f'image_text_pairs_{split}_sd_epic.pkl')
             if os.path.exists(saved_data_path):
                 print("Loading saved data...")
                 self.recover_data(saved_data_path)

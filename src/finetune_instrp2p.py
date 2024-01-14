@@ -304,6 +304,11 @@ def parse_args():
         help="Whether or not to run validation during training.",
     )
     parser.add_argument(
+        "--only_val",
+        action="store_true",
+        help="Whether or not to run validation during training.",
+    )
+    parser.add_argument(
         "--learning_rate",
         type=float,
         default=1e-4,
@@ -1175,7 +1180,7 @@ def main():
         if epoch % args.checkpointing_steps == 0:
             if accelerator.is_main_process:
                 save_path = os.path.join(
-                    args.output_dir, f"checkpoint-{global_step}"
+                    args.output_dir, f"checkpoint-{global_step}-{epoch}"
                 )
                 accelerator.save_state(save_path)
                 logger.info(f"Saved state to {save_path}")
@@ -1204,8 +1209,6 @@ def main():
                 )
                 # Deal with the issue oom
                 device = accelerator.device
-                if accelerator.num_processes < torch.cuda.device_count():
-                    device = torch.device(f"cuda:{torch.cuda.device_count()-1}")
                 pipeline = pipeline.to(device)
                 pipeline.set_progress_bar_config(disable=True)
 
@@ -1221,7 +1224,7 @@ def main():
                         for bn in tqdm(range(len(batch['text'][:10])), desc="Generating val images"):
                             # latent = latent_qformer(batch['exo_pixel_values'][bn].unsqueeze(0), batch['input_ids'][bn].unsqueeze(0))
                             # original_image = pipeline.numpy_to_pil(pipeline.decode_latents(latent))[0]
-                            original_image = batch['original_image'][bn].to(device)
+                            original_image = batch['original_image'][bn]
                             edited_image = (
                                 pipeline(
                                     batch['text'][bn],
