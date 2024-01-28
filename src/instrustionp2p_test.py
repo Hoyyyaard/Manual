@@ -33,6 +33,7 @@ from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel, AutoProcessor
 import os 
+from accelerate import dispatch_model
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -92,83 +93,83 @@ train_dataloader = torch.utils.data.DataLoader(
     num_workers=0,
 )
 
-unet = UNet2DConditionModel.from_pretrained(
-    'timbrooks/instruct-pix2pix',
-    subfolder="unet",
-)
-accelerator = Accelerator(mixed_precision='fp16')
+# unet = UNet2DConditionModel.from_pretrained(
+#     'timbrooks/instruct-pix2pix',
+#     subfolder="unet",
+# )
+# accelerator = Accelerator(mixed_precision='fp16')
 
-def load_model_hook(models, input_dir):
+# def load_model_hook(models, input_dir):
 
-    for i in range(len(models)):
-        # pop models so that they are not loaded again
-        model = models.pop()
+#     for i in range(len(models)):
+#         # pop models so that they are not loaded again
+#         model = models.pop()
 
-        # load diffusers style into model
-        load_model = UNet2DConditionModel.from_pretrained(
-            input_dir, subfolder="unet"
-        )
-        model.register_to_config(**load_model.config)
+#         # load diffusers style into model
+#         load_model = UNet2DConditionModel.from_pretrained(
+#             input_dir, subfolder="unet"
+#         )
+#         model.register_to_config(**load_model.config)
 
-        model.load_state_dict(load_model.state_dict())
-        del load_model
+#         model.load_state_dict(load_model.state_dict())
+#         del load_model
 
-accelerator.register_load_state_pre_hook(load_model_hook)
+# accelerator.register_load_state_pre_hook(load_model_hook)
 
-unet = accelerator.prepare(unet)
+# unet = accelerator.prepare(unet)
 
 # Get the most recent checkpoint
 dirs = os.listdir(args.checkpoint_dir)
 dirs = [d for d in dirs if d.startswith("checkpoint")]
 dirs = sorted(dirs, key=lambda x: int(x.split('/')[-1].split("-")[1]))
 path = dirs[-1] if len(dirs) > 0 else None
+unet = UNet2DConditionModel.from_pretrained(
+    os.path.join(args.checkpoint_dir, path),
+    subfolder="unet",
+)
+# accelerator.print(f"Resuming from checkpoint {os.path.join(args.checkpoint_dir, path)}")
+# accelerator.load_state(os.path.join(args.checkpoint_dir, path))
 
-accelerator.print(f"Resuming from checkpoint {os.path.join(args.checkpoint_dir, path)}")
-accelerator.load_state(os.path.join(args.checkpoint_dir, path))
 global_step = int(path.split('/')[-1].split("-")[1])
 epoch = global_step = int(path.split('/')[-1].split("-")[2])
 
 pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
                 'timbrooks/instruct-pix2pix',
-                unet=unet ,
+                unet=unet.to(torch.float16) ,
                 torch_dtype=torch.float16,
+                device_map="auto"
             )
+del unet
+# pipeline = pipeline.to('cuda')
 
-pipeline.to('cuda')
 
-with accelerator.accumulate(unet):
-
-    for batch in train_dataloader:
-        with torch.no_grad():
-            edited_images = []
-            texts = []
+for batch in train_dataloader:
+    with torch.no_grad():
+        edited_images = []
+        texts = []
+        
+        for bn in tqdm(range(len(batch['text'][:10])), desc="Generating val images"):
             
-            with torch.autocast(
-                    'cuda',
-                    enabled=accelerator.mixed_precision == "fp16",
-                ):
-                for bn in tqdm(range(len(batch['text'][:10])), desc="Generating val images"):
-                    
-                    original_image = batch['original_image'][bn]
-                    edited_image = (
-                        pipeline(
-                            batch['text'][bn],
-                            image=original_image,
-                            num_inference_steps=20,
-                            image_guidance_scale=1.5,
-                            guidance_scale=7,
-                        ).images[0]
-                    )
-                    h_concat = PIL.Image.new('RGB', (edited_image.width * 2, edited_image.height))
-                    h_concat.paste(original_image, (0, 0))
-                    h_concat.paste(edited_image, (edited_image.width, 0))
-                    edited_images.append(h_concat)
-                    texts.append(batch['text'][bn])
-        #  Log images to disk
-        output_dir = args.checkpoint_dir
-        for img, prompt in zip(edited_images, texts):
-            os.makedirs(os.path.join(output_dir, 'vis', f'epoch{epoch}_step[{global_step}]'), exist_ok=True)
-            img.save(os.path.join(output_dir, 'vis', f'epoch{epoch}_step[{global_step}]', f"{prompt.replace(' ', '_')}.png"))            
-        
-        
-        break
+            original_image = batch['original_image'][bn]
+            edited_image = (
+                pipeline(
+                    batch['text'][bn],
+                    image=original_image,
+                    num_inference_steps=20,
+                    image_guidance_scale=1.5,
+                    guidance_scale=7,
+                ).images[0]
+            )
+            h_concat = PIL.Image.new('RGB', (edited_image.width * 2, edited_image.height))
+            h_concat.paste(original_image, (0, 0))
+            h_concat.paste(edited_image, (edited_image.width, 0))
+            edited_images.append(h_concat)
+            texts.append(batch['text'][bn])
+    #  Log images to disk
+    output_dir = args.checkpoint_dir
+    for img, prompt in zip(edited_images, texts):
+        os.makedirs(os.path.join(output_dir, 'vis', f'epoch{epoch}_step[{global_step}]'), exist_ok=True)
+        img.save(os.path.join(output_dir, 'vis', f'epoch{epoch}_step[{global_step}]', f"{prompt.replace(' ', '_')}.png"))            
+    
+    
+    break

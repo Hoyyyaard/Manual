@@ -17,12 +17,13 @@ base_dir = os.path.dirname(parent_directory)
 sys.path.append(base_dir)
 from src.dataset import ControlNet_Finetune_Dataset
 NP = os.getenv("NP", 1)
+NN = int(os.getenv("NN", 1))
 
-opd = 'results/ControlNet/finetune_sd21'
+opd = 'results/ControlNet/finetune_sd21_qformer'
 import torch
 # Configs
 
-batch_size = 4
+batch_size = 1
 logger_freq = 200
 learning_rate = 1e-5
 sd_locked = True
@@ -38,14 +39,16 @@ if torch.cuda.current_device() == 0:
         versions.sort(key=lambda x: int(x.split('_')[-1]), reverse=True)
         ckpts = os.listdir(os.path.join(opd, 'lightning_logs', versions[0], 'checkpoints'))
         ckpts.sort(key=lambda x: int(x.split('-')[-1].split('=')[-1].split('.')[0]), reverse=True)
-        resume_path = os.path.join(opd, 'lightning_logs', versions[0], 'checkpoints', ckpts[0])
-        
+        try:
+            resume_path = os.path.join(opd, 'lightning_logs', versions[0], 'checkpoints', ckpts[0])
+        except:
+            resume_path = None
     else:
-        resume_path = 'src/ControlNet/models/control_sd21_ini.ckpt'
+        resume_path = None
 
     print('Resume from: ', resume_path)
 
-    model.load_state_dict(load_state_dict(resume_path, location='cpu'))
+    model.load_state_dict(load_state_dict('src/ControlNet/models/control_sd21_ini.ckpt', location='cpu'))
 
 model.learning_rate = learning_rate
 model.sd_locked = sd_locked
@@ -56,7 +59,12 @@ model.only_mid_control = only_mid_control
 dataset = ControlNet_Finetune_Dataset()
 dataloader = DataLoader(dataset, num_workers=0, batch_size=batch_size, shuffle=False)
 logger = ImageLogger(batch_frequency=logger_freq)
-trainer = pl.Trainer(gpus=NP, precision=16, callbacks=[logger, pl.callbacks.ModelCheckpoint(every_n_train_steps=500, save_top_k=-1)], enable_checkpointing=True, accumulate_grad_batches=1, default_root_dir=opd, strategy="ddp")
+trainer = pl.Trainer(gpus=NP, num_nodes=NN, resume_from_checkpoint=resume_path, precision=16, callbacks=[logger, pl.callbacks.ModelCheckpoint(every_n_train_steps=500, save_top_k=-1)], enable_checkpointing=True, accumulate_grad_batches=1, default_root_dir=opd, strategy="ddp")
+try:
+    trainer.global_step = int(resume_path.split('/')[-1].split('-')[-1].split('=')[-1].split('.')[0])
+except Exception as e:
+    print(e)
+    
 
 
 # Train!

@@ -917,11 +917,18 @@ def main():
     print("Loading dataset...")
     from dataset import Diffusion_Finetune_Dataset
     train_dataset = Diffusion_Finetune_Dataset(preprocess_func=preprocess_func, use_exo=args.use_exo)
-    
+    val_dataset.episodes = Diffusion_Finetune_Dataset(preprocess_func=preprocess_func, use_exo=args.use_exo, split='val')
 
     # DataLoaders creation:
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
+        shuffle=True,
+        collate_fn=collate_fn,
+        batch_size=args.train_batch_size,
+        num_workers=args.dataloader_num_workers,
+    )
+    val_dataloader = torch.utils.data.DataLoader(
+        val_dataset,
         shuffle=True,
         collate_fn=collate_fn,
         batch_size=args.train_batch_size,
@@ -948,8 +955,8 @@ def main():
     # unet, latent_qformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
     #     unet, latent_qformer, optimizer, train_dataloader, lr_scheduler
     # )
-    unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader, lr_scheduler
+    unet, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
+        unet, optimizer, train_dataloader,val_dataloader, lr_scheduler
     )
     
     if args.use_ema:
@@ -1221,10 +1228,10 @@ def main():
                     enabled=accelerator.mixed_precision == "fp16",
                 ):
                     with torch.no_grad():
-                        for bn in tqdm(range(len(batch['text'][:10])), desc="Generating val images"):
+                        for bn in tqdm(range(len(batch['text'][:10])), desc="Generating train images"):
                             # latent = latent_qformer(batch['exo_pixel_values'][bn].unsqueeze(0), batch['input_ids'][bn].unsqueeze(0))
                             # original_image = pipeline.numpy_to_pil(pipeline.decode_latents(latent))[0]
-                            original_image = batch['original_image'][bn]
+                            original_image = batch['original_image'][bn].resize((args.resolution, args.resolution))
                             edited_image = (
                                 pipeline(
                                     batch['text'][bn],
@@ -1238,13 +1245,47 @@ def main():
                             h_concat = PIL.Image.new('RGB', (edited_image.width * 3, edited_image.height))
                             h_concat.paste(original_image, (0, 0))
                             h_concat.paste(edited_image, (edited_image.width, 0))
-                            h_concat.paste(batch['image'][bn], (edited_image.width*2, 0))
+                            h_concat.paste(batch['image'][bn].resize((args.resolution, args.resolution)), (edited_image.width*2, 0))
                             edited_images.append(h_concat)
                             texts.append(batch['text'][bn])
                 #  Log images to disk
                 for img, prompt in zip(edited_images, texts):
-                    os.makedirs(os.path.join(args.output_dir, 'vis', f'epoch[{epoch}]_step[{global_step}]'), exist_ok=True)
-                    img.save(os.path.join(args.output_dir, 'vis', f'epoch[{epoch}]_step[{global_step}]', f"{prompt.replace(' ', '_')}.png"))            
+                    os.makedirs(os.path.join(args.output_dir, 'vis', f'train_epoch[{epoch}]_step[{global_step}]'), exist_ok=True)
+                    img.save(os.path.join(args.output_dir, 'vis', f'train_epoch[{epoch}]_step[{global_step}]', f"{prompt.replace(' ', '_')[:-1]}.png"))
+
+
+                edited_images = []
+                texts = []
+                with torch.autocast(
+                    'cuda',
+                    enabled=accelerator.mixed_precision == "fp16",
+                ):
+                    for vbatch in enumerate(val_dataloader):
+                        with torch.no_grad():
+                            for bn in tqdm(range(len(vbatch['text'][:10])), desc="Generating val images"):
+                                # latent = latent_qformer(batch['exo_pixel_values'][bn].unsqueeze(0), batch['input_ids'][bn].unsqueeze(0))
+                                # original_image = pipeline.numpy_to_pil(pipeline.decode_latents(latent))[0]
+                                original_image = vbatch['original_image'][bn].resize((args.resolution, args.resolution))
+                                edited_image = (
+                                    pipeline(
+                                        vbatch['text'][bn],
+                                        image=original_image,
+                                        num_inference_steps=20,
+                                        image_guidance_scale=1.5,
+                                        guidance_scale=7,
+                                        generator=generator,
+                                    ).images[0]
+                                )
+                                h_concat = PIL.Image.new('RGB', (edited_image.width * 3, edited_image.height))
+                                h_concat.paste(original_image, (0, 0))
+                                h_concat.paste(edited_image, (edited_image.width, 0))
+                                h_concat.paste(vbatch['image'][bn].resize((args.resolution, args.resolution)), (edited_image.width*2, 0))
+                                edited_images.append(h_concat)
+                                texts.append(vbatch['text'][bn])
+                #  Log images to disk
+                for img, prompt in zip(edited_images, texts):
+                    os.makedirs(os.path.join(args.output_dir, 'vis', f'val_epoch[{epoch}]_step[{global_step}]'), exist_ok=True)
+                    img.save(os.path.join(args.output_dir, 'vis', f'val_epoch[{epoch}]_step[{global_step}]', f"{prompt.replace(' ', '_')[:-1]}.png"))            
 
                 for tracker in accelerator.trackers:
                     if tracker.name == "wandb":
