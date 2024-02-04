@@ -5,6 +5,7 @@ import cv2
 from torch.utils.data import Dataset
 from typing import Optional, Dict, Sequence
 from pathlib import Path
+import random
 import imageio
 from PIL import Image
 import sys
@@ -123,7 +124,7 @@ class Diffusion_Finetune_Dataset(Dataset):
         self.preprocess_func = preprocess_func
         self.episodes = []
         self.use_exo = use_exo
-        
+        os.makedirs(os.path.join('datasets', 'EgoExo4d', 'save_data'), exist_ok=True)
         if 'egoexo' in dataset_list:
             saved_data_path = os.path.join('datasets', 'EgoExo4d', 'save_data', f'image_text_pairs_{split}_sd_exo.pkl')
             if os.path.exists(saved_data_path):
@@ -193,7 +194,7 @@ class Diffusion_Finetune_Dataset(Dataset):
             return {'pixel_values':pixel_values, 
                     'input_ids':input_ids,
                     'image':image,
-                    'original_image':exo_images[0],
+                    'original_image':random.choice(exo_images),
                     'text':text,
                     'exo_pixel_values':exo_pixel_values,
                     'original_pixel_values':exo_pixel_values[0],
@@ -630,6 +631,7 @@ class EgoExo4d_Prerain_Dataset(Dataset):
                 # Cv2 capture or  decord reader
                 # video_captures.update({video_name: cv2.VideoCapture(mp4_p)})
                 
+                print('mp4_p: ', mp4_p)
                 with open(mp4_p, 'rb') as f:
                     if 'ego' in video_name:
                         video_captures.update({video_name: VideoReader(f, ctx=cpu(0))})

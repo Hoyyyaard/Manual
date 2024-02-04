@@ -8,8 +8,8 @@ while true; do
     echo "Loop counter: $LOOP_COUNTER"
     srun -J la-g --gres=gpu:$NUM_GPUS_PER_NODE --cpus-per-task=4 -N $NUM_NODES --mem=300G \
     --time 08:00:00 \
-    --nodelist superpod-gpu[001-002] --nodelist umd-cscdr-gpu[001-002] --nodelist uri-gpu[001-002] \
-    -p gpu-preempt  -p gpu\
+    --nodelist superpod-gpu[001-002] --nodelist umd-cscdr-gpu[001-002]  \
+    -p gpu-preempt  \
     --pty bash $SCRIPT $NUM_GPUS_PER_NODE $NUM_NODES $JOB_ID 
     
     sleep 10

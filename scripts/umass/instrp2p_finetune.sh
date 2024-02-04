@@ -2,7 +2,7 @@ export MODEL_NAME="timbrooks/instruct-pix2pix"
 /project/pi_chuangg_umass_edu/chenpeihao/miniconda3/envs/minigpt5/bin/python -m accelerate.commands.launch src/finetune_instrp2p.py \
   --pretrained_model_name_or_path=$MODEL_NAME \
   --use_ema \
-  --resolution=256 --center_crop --random_flip \
+  --resolution=256 --center_crop \
   --train_batch_size=32 \
   --gradient_accumulation_steps=4 \
   --gradient_checkpointing \
@@ -16,7 +16,7 @@ export MODEL_NAME="timbrooks/instruct-pix2pix"
   --max_grad_norm=1 \
   --lr_scheduler="constant" \
   --lr_warmup_steps=0 \
-  --output_dir=results/diffusion/instrp2p_res256 \
+  --output_dir=results/diffusion/instrp2p_res256_train \
   --report_to=tensorboard \
   --val \
   --resume_from_checkpoint latest \

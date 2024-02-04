@@ -917,7 +917,7 @@ def main():
     print("Loading dataset...")
     from dataset import Diffusion_Finetune_Dataset
     train_dataset = Diffusion_Finetune_Dataset(preprocess_func=preprocess_func, use_exo=args.use_exo)
-    val_dataset.episodes = Diffusion_Finetune_Dataset(preprocess_func=preprocess_func, use_exo=args.use_exo, split='val')
+    val_dataset = Diffusion_Finetune_Dataset(preprocess_func=preprocess_func, use_exo=args.use_exo, split='val')
 
     # DataLoaders creation:
     train_dataloader = torch.utils.data.DataLoader(
@@ -1260,7 +1260,7 @@ def main():
                     'cuda',
                     enabled=accelerator.mixed_precision == "fp16",
                 ):
-                    for vbatch in enumerate(val_dataloader):
+                    for vbatch in (val_dataloader):
                         with torch.no_grad():
                             for bn in tqdm(range(len(vbatch['text'][:10])), desc="Generating val images"):
                                 # latent = latent_qformer(batch['exo_pixel_values'][bn].unsqueeze(0), batch['input_ids'][bn].unsqueeze(0))
@@ -1282,6 +1282,7 @@ def main():
                                 h_concat.paste(vbatch['image'][bn].resize((args.resolution, args.resolution)), (edited_image.width*2, 0))
                                 edited_images.append(h_concat)
                                 texts.append(vbatch['text'][bn])
+                            break
                 #  Log images to disk
                 for img, prompt in zip(edited_images, texts):
                     os.makedirs(os.path.join(args.output_dir, 'vis', f'val_epoch[{epoch}]_step[{global_step}]'), exist_ok=True)

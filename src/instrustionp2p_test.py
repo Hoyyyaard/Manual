@@ -92,6 +92,14 @@ train_dataloader = torch.utils.data.DataLoader(
     batch_size=20,
     num_workers=0,
 )
+val_dataset = Diffusion_Finetune_Dataset(preprocess_func=preprocess_func, use_exo=True, split='val')
+val_dataloader = torch.utils.data.DataLoader(
+    val_dataset,
+    shuffle=True,
+    collate_fn=collate_fn,
+    batch_size=20,
+    num_workers=0,
+)
 
 # unet = UNet2DConditionModel.from_pretrained(
 #     'timbrooks/instruct-pix2pix',
@@ -148,6 +156,37 @@ for batch in train_dataloader:
         edited_images = []
         texts = []
         
+        for bn in tqdm(range(len(batch['text'][:10])), desc="Generating train images"):
+            
+            original_image = batch['original_image'][bn]
+            edited_image = (
+                pipeline(
+                    batch['text'][bn],
+                    image=original_image,
+                    num_inference_steps=20,
+                    image_guidance_scale=1.5,
+                    guidance_scale=7,
+                ).images[0]
+            )
+            h_concat = PIL.Image.new('RGB', (edited_image.width * 2, edited_image.height))
+            h_concat.paste(original_image, (0, 0))
+            h_concat.paste(edited_image, (edited_image.width, 0))
+            edited_images.append(h_concat)
+            texts.append(batch['text'][bn])
+    #  Log images to disk
+    output_dir = args.checkpoint_dir
+    for img, prompt in zip(edited_images, texts):
+        os.makedirs(os.path.join(output_dir, 'vis', f'train_epoch{epoch}_step[{global_step}]'), exist_ok=True)
+        img.save(os.path.join(output_dir, 'vis', f'train_epoch{epoch}_step[{global_step}]', f"{prompt.replace(' ', '_')}.png"))            
+    
+    
+    break
+
+for batch in val_dataloader:
+    with torch.no_grad():
+        edited_images = []
+        texts = []
+        
         for bn in tqdm(range(len(batch['text'][:10])), desc="Generating val images"):
             
             original_image = batch['original_image'][bn]
@@ -168,8 +207,8 @@ for batch in train_dataloader:
     #  Log images to disk
     output_dir = args.checkpoint_dir
     for img, prompt in zip(edited_images, texts):
-        os.makedirs(os.path.join(output_dir, 'vis', f'epoch{epoch}_step[{global_step}]'), exist_ok=True)
-        img.save(os.path.join(output_dir, 'vis', f'epoch{epoch}_step[{global_step}]', f"{prompt.replace(' ', '_')}.png"))            
+        os.makedirs(os.path.join(output_dir, 'vis', f'val_epoch{epoch}_step[{global_step}]'), exist_ok=True)
+        img.save(os.path.join(output_dir, 'vis', f'val_epoch{epoch}_step[{global_step}]', f"{prompt.replace(' ', '_')}.png"))            
     
     
     break
