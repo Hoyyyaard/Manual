@@ -45,9 +45,10 @@ def parse_args():
     parser.add_argument('--split', type=str, default='train', choices=['train', 'val', 'test'], help='Split of the dataset')
     parser.add_argument('--cooking_only', action='store_true', help='Only use cooking tasks')
     parser.add_argument('--preprocess', action='store_true', help='Preprocess dataset')
+    parser.add_argument('--split_egoexo_pretrain', action='store_true', help='')
     parser.add_argument('--chunk', type=int, default=1, help='Chunk size for preprocessed dataset')
     parser.add_argument('--chunk_idx', type=int, default=0, help='Chunk index for preprocessed dataset')
-    parser.add_argument('--dataset',choices=['egoexo_pretrain', 'egoexo_finetune', 'epic_pretrain'],required=True, help='Dataset to use')
+    parser.add_argument('--dataset',choices=['egoexo_pretrain', 'egoexo_finetune', 'epic_pretrain'], help='Dataset to use')
     args = parser.parse_args()
     return args
 
@@ -827,13 +828,34 @@ class EgoExo4d_Prerain_Dataset(Dataset):
             result = Image.new(pil_img.mode, (height, height), background_color)
             result.paste(pil_img, ((height - width) // 2, 0))
             return result
-    
+
+
+def split_egoexo_pretrain_set():
+    print("Start split dataset for egoexo pretrain set")
+    val_scene = 'georgiatech_cooking'
+    root_dir = 'datasets/EgoExo4d/preprocessed_episodes_bak'
+    train_dir = os.path.join(root_dir, 'train')
+    val_dir = os.path.join(root_dir, 'val')
+    import glob
+    import shutil
+    origin_train_set = glob.glob(os.path.join(train_dir, '*'))
+    origin_val_set = glob.glob(os.path.join(val_dir, '*'))
+    for take in origin_train_set:
+        if val_scene in take:
+            shutil.move(take, val_dir)
+    for take in origin_val_set:
+        if val_scene not in take:
+            shutil.move(take, train_dir)
+
 
 if __name__ == '__main__':
     args = parse_args()
-    if args.dataset == 'egoexo_pretrain':
-        pretrain_egoexo = EgoExo4d_Prerain_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx)
-    elif args.dataset == 'egoexo_finetune':
-        finetune_egoexo = EgoExo4d_Finetune_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx)
-    elif args.dataset == 'epic_pretrain':
-        pretrain_epic = Epic_Kitchen_Text_Image_Pairs_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx)
+    if args.split_egoexo_pretrain:
+        split_egoexo_pretrain_set()
+    else:
+        if args.dataset == 'egoexo_pretrain':
+            pretrain_egoexo = EgoExo4d_Prerain_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx)
+        elif args.dataset == 'egoexo_finetune':
+            finetune_egoexo = EgoExo4d_Finetune_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx)
+        elif args.dataset == 'epic_pretrain':
+            pretrain_epic = Epic_Kitchen_Text_Image_Pairs_Dataset(split=args.split, preprocess=args.preprocess, chunk=args.chunk, chunk_idx=args.chunk_idx)
