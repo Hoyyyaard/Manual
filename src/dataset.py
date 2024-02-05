@@ -119,12 +119,13 @@ class Diffusion_Finetune_Dataset(Dataset):
         This dataset will leverage different preprocessed dataset:
             1. EgoExo4d_Finetune_Dataset
     '''
-    def __init__(self, split='train', preprocess_func=None, dataset_list= ['egoexo'], use_exo=True):
+    def __init__(self, split='train', preprocess_func=None, dataset_list= ['egoexo'], use_exo=True, avg_exo=False):
         self.EgoExo4d_Pretrain_dataset_path = os.path.join('datasets', 'EgoExo4d', 'preprocessed_episodes', split)
         self.Epic_Kitchen_Text_Image_Pairs_dataset_path = os.path.join('datasets', 'epic-kitchen', 'text_image_pairs', split)
         self.preprocess_func = preprocess_func
         self.episodes = []
         self.use_exo = use_exo
+        self.avg_exo = avg_exo  
         os.makedirs(os.path.join('datasets', 'EgoExo4d', 'save_data'), exist_ok=True)
         if 'egoexo' in dataset_list:
             saved_data_path = os.path.join('datasets', 'EgoExo4d', 'save_data', f'image_text_pairs_{split}_sd_exo.pkl')
@@ -195,10 +196,10 @@ class Diffusion_Finetune_Dataset(Dataset):
             return {'pixel_values':pixel_values, 
                     'input_ids':input_ids,
                     'image':image,
-                    'original_image':random.choice(exo_images),
+                    'original_image':random.choice(exo_images) if not self.avg_exo else exo_images,
                     'text':text,
                     'exo_pixel_values':exo_pixel_values,
-                    'original_pixel_values':exo_pixel_values[0],
+                    'original_pixel_values':random.choice(exo_pixel_values) if not self.avg_exo else exo_pixel_values,  
                     }
 
         return {'pixel_values':pixel_values, 

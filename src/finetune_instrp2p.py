@@ -41,6 +41,7 @@ from datasets import load_dataset
 from diffusers import (AutoencoderKL, DDPMScheduler,
                        StableDiffusionInstructPix2PixPipeline,
                        UNet2DConditionModel)
+from diffusers.pipelines.stable_diffusion.pipeline_output import StableDiffusionPipelineOutput
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import EMAModel
 from diffusers.utils import check_min_version, deprecate, is_wandb_available
@@ -75,6 +76,275 @@ sys.path.append(base_dir)
 from minigpt4.models.blip2 import Blip2Base, disabled_train
 from transformers import LlamaTokenizer
 
+
+class StableDiffusionInstructPix2PixPipeline_AvgExo(StableDiffusionInstructPix2PixPipeline):
+    
+    def prepare_image_latents(
+        self, images, batch_size, num_images_per_prompt, dtype, device, do_classifier_free_guidance, generator=None
+    ):
+
+        def retrieve_latents(
+            encoder_output: torch.Tensor, generator: Optional[torch.Generator] = None, sample_mode: str = "sample"
+        ):
+            if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
+                return encoder_output.latent_dist.sample(generator)
+            elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
+                return encoder_output.latent_dist.mode()
+            elif hasattr(encoder_output, "latents"):
+                return encoder_output.latents
+            else:
+                raise AttributeError("Could not access latents of provided encoder_output")
+
+        image_latents = []
+        for image in images:
+            image = image.to(device=device, dtype=dtype)
+
+            batch_size = batch_size * num_images_per_prompt
+
+            image_latent = retrieve_latents(self.vae.encode(image), sample_mode="argmax")
+            image_latents.append(image_latent)
+        image_latents = torch.stack(image_latents, dim=0)
+        image_latents = torch.sum(image_latents, dim=0)
+
+        if batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] == 0:
+            # expand image_latents for batch_size
+            deprecation_message = (
+                f"You have passed {batch_size} text prompts (`prompt`), but only {image_latents.shape[0]} initial"
+                " images (`image`). Initial images are now duplicating to match the number of text prompts. Note"
+                " that this behavior is deprecated and will be removed in a version 1.0.0. Please make sure to update"
+                " your script to pass as many initial images as text prompts to suppress this warning."
+            )
+            deprecate("len(prompt) != len(image)", "1.0.0", deprecation_message, standard_warn=False)
+            additional_image_per_prompt = batch_size // image_latents.shape[0]
+            image_latents = torch.cat([image_latents] * additional_image_per_prompt, dim=0)
+        elif batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] != 0:
+            raise ValueError(
+                f"Cannot duplicate `image` of batch size {image_latents.shape[0]} to {batch_size} text prompts."
+            )
+        else:
+            image_latents = torch.cat([image_latents], dim=0)
+
+        if do_classifier_free_guidance:
+            uncond_image_latents = torch.zeros_like(image_latents)
+            image_latents = torch.cat([image_latents, image_latents, uncond_image_latents], dim=0)
+
+        return image_latents
+
+    @torch.no_grad()
+    def __call__(
+        self,
+        prompt,
+        image,
+        num_inference_steps: int = 100,
+        guidance_scale: float = 7.5,
+        image_guidance_scale: float = 1.5,
+        negative_prompt = None,
+        num_images_per_prompt: Optional[int] = 1,
+        eta: float = 0.0,
+        generator = None,
+        latents: Optional[torch.FloatTensor] = None,
+        prompt_embeds: Optional[torch.FloatTensor] = None,
+        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        output_type: Optional[str] = "pil",
+        return_dict: bool = True,
+        callback_on_step_end = None,
+        callback_on_step_end_tensor_inputs = ["latents"],
+        **kwargs,
+    ):
+
+
+        callback = kwargs.pop("callback", None)
+        callback_steps = kwargs.pop("callback_steps", None)
+
+        if callback is not None:
+            deprecate(
+                "callback",
+                "1.0.0",
+                "Passing `callback` as an input argument to `__call__` is deprecated, consider use `callback_on_step_end`",
+            )
+        if callback_steps is not None:
+            deprecate(
+                "callback_steps",
+                "1.0.0",
+                "Passing `callback_steps` as an input argument to `__call__` is deprecated, consider use `callback_on_step_end`",
+            )
+
+        # 0. Check inputs
+        self.check_inputs(
+            prompt,
+            callback_steps,
+            negative_prompt,
+            prompt_embeds,
+            negative_prompt_embeds,
+            callback_on_step_end_tensor_inputs,
+        )
+        self._guidance_scale = guidance_scale
+        self._image_guidance_scale = image_guidance_scale
+
+        if image is None:
+            raise ValueError("`image` input cannot be undefined.")
+
+        # 1. Define call parameters
+        if prompt is not None and isinstance(prompt, str):
+            batch_size = 1
+        elif prompt is not None and isinstance(prompt, list):
+            batch_size = len(prompt)
+        else:
+            batch_size = prompt_embeds.shape[0]
+
+        device = self._execution_device
+        # check if scheduler is in sigmas space
+        scheduler_is_in_sigma_space = hasattr(self.scheduler, "sigmas")
+
+        # 2. Encode input prompt
+        prompt_embeds = self._encode_prompt(
+            prompt,
+            device,
+            num_images_per_prompt,
+            self.do_classifier_free_guidance,
+            negative_prompt,
+            prompt_embeds=prompt_embeds,
+            negative_prompt_embeds=negative_prompt_embeds,
+        )
+
+        # 3. Preprocess image
+        image = [self.image_processor.preprocess(img) for img in image]
+
+        # 4. set timesteps
+        self.scheduler.set_timesteps(num_inference_steps, device=device)
+        timesteps = self.scheduler.timesteps
+
+        # 5. Prepare Image latents
+    
+        image_latents = self.prepare_image_latents(
+            image,
+            batch_size,
+            num_images_per_prompt,
+            prompt_embeds.dtype,
+            device,
+            self.do_classifier_free_guidance,
+        )
+
+        height, width = image_latents.shape[-2:]
+        height = height * self.vae_scale_factor
+        width = width * self.vae_scale_factor
+
+        # 6. Prepare latent variables
+        num_channels_latents = self.vae.config.latent_channels
+        latents = self.prepare_latents(
+            batch_size * num_images_per_prompt,
+            num_channels_latents,
+            height,
+            width,
+            prompt_embeds.dtype,
+            device,
+            generator,
+            latents,
+        )
+
+        # 7. Check that shapes of latents and image match the UNet channels
+        num_channels_image = image_latents.shape[1]
+        if num_channels_latents + num_channels_image != self.unet.config.in_channels:
+            raise ValueError(
+                f"Incorrect configuration settings! The config of `pipeline.unet`: {self.unet.config} expects"
+                f" {self.unet.config.in_channels} but received `num_channels_latents`: {num_channels_latents} +"
+                f" `num_channels_image`: {num_channels_image} "
+                f" = {num_channels_latents+num_channels_image}. Please verify the config of"
+                " `pipeline.unet` or your `image` input."
+            )
+
+        # 8. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline
+        extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
+
+        # 9. Denoising loop
+        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        self._num_timesteps = len(timesteps)
+        with self.progress_bar(total=num_inference_steps) as progress_bar:
+            for i, t in enumerate(timesteps):
+                # Expand the latents if we are doing classifier free guidance.
+                # The latents are expanded 3 times because for pix2pix the guidance\
+                # is applied for both the text and the input image.
+                latent_model_input = torch.cat([latents] * 3) if self.do_classifier_free_guidance else latents
+
+                # concat latents, image_latents in the channel dimension
+                scaled_latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+                scaled_latent_model_input = torch.cat([scaled_latent_model_input, image_latents], dim=1)
+
+                # predict the noise residual
+                noise_pred = self.unet(
+                    scaled_latent_model_input, t, encoder_hidden_states=prompt_embeds, return_dict=False
+                )[0]
+
+                # Hack:
+                # For karras style schedulers the model does classifer free guidance using the
+                # predicted_original_sample instead of the noise_pred. So we need to compute the
+                # predicted_original_sample here if we are using a karras style scheduler.
+                if scheduler_is_in_sigma_space:
+                    step_index = (self.scheduler.timesteps == t).nonzero()[0].item()
+                    sigma = self.scheduler.sigmas[step_index]
+                    noise_pred = latent_model_input - sigma * noise_pred
+
+                # perform guidance
+                if self.do_classifier_free_guidance:
+                    noise_pred_text, noise_pred_image, noise_pred_uncond = noise_pred.chunk(3)
+                    noise_pred = (
+                        noise_pred_uncond
+                        + self.guidance_scale * (noise_pred_text - noise_pred_image)
+                        + self.image_guidance_scale * (noise_pred_image - noise_pred_uncond)
+                    )
+
+                # Hack:
+                # For karras style schedulers the model does classifer free guidance using the
+                # predicted_original_sample instead of the noise_pred. But the scheduler.step function
+                # expects the noise_pred and computes the predicted_original_sample internally. So we
+                # need to overwrite the noise_pred here such that the value of the computed
+                # predicted_original_sample is correct.
+                if scheduler_is_in_sigma_space:
+                    noise_pred = (noise_pred - latents) / (-sigma)
+
+                # compute the previous noisy sample x_t -> x_t-1
+                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
+
+                if callback_on_step_end is not None:
+                    callback_kwargs = {}
+                    for k in callback_on_step_end_tensor_inputs:
+                        callback_kwargs[k] = locals()[k]
+                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+
+                    latents = callback_outputs.pop("latents", latents)
+                    prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
+                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+                    image_latents = callback_outputs.pop("image_latents", image_latents)
+
+                # call the callback, if provided
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                    progress_bar.update()
+                    if callback is not None and i % callback_steps == 0:
+                        step_idx = i // getattr(self.scheduler, "order", 1)
+                        callback(step_idx, t, latents)
+
+        if not output_type == "latent":
+            image = self.vae.decode(latents / self.vae.config.scaling_factor, return_dict=False)[0]
+            # image, has_nsfw_concept = self.run_safety_checker(image, device, prompt_embeds.dtype)
+            has_nsfw_concept = None
+        else:
+            image = latents
+            has_nsfw_concept = None
+
+        if has_nsfw_concept is None:
+            do_denormalize = [True] * image.shape[0]
+        else:
+            do_denormalize = [not has_nsfw for has_nsfw in has_nsfw_concept]
+
+        image = self.image_processor.postprocess(image, output_type=output_type, do_denormalize=do_denormalize)
+
+        # Offload all models
+        self.maybe_free_model_hooks()
+
+        if not return_dict:
+            return (image, has_nsfw_concept)
+
+        return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
 
 class Latent_Qformer(nn.Module):
     def __init__(self, vocab_size, image_size=512):
@@ -348,6 +618,10 @@ def parse_args():
     )
     parser.add_argument(
         "--use_exo",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--avg_exo",
         action="store_true",
     )
     parser.add_argument(
@@ -916,8 +1190,8 @@ def main():
         return train_transforms(image), tokenize_captions(text)
     print("Loading dataset...")
     from dataset import Diffusion_Finetune_Dataset
-    train_dataset = Diffusion_Finetune_Dataset(preprocess_func=preprocess_func, use_exo=args.use_exo)
-    val_dataset = Diffusion_Finetune_Dataset(preprocess_func=preprocess_func, use_exo=args.use_exo, split='val')
+    train_dataset = Diffusion_Finetune_Dataset(preprocess_func=preprocess_func, use_exo=args.use_exo, avg_exo=args.avg_exo, split='train')
+    val_dataset = Diffusion_Finetune_Dataset(preprocess_func=preprocess_func, use_exo=args.use_exo, avg_exo=args.avg_exo, split='val')
 
     # DataLoaders creation:
     train_dataloader = torch.utils.data.DataLoader(
@@ -1089,10 +1363,21 @@ def main():
                 # Get the additional image embedding for conditioning.
                 # Instead of getting a diagonal Gaussian here, we simply take the mode.
                 
-                
-                original_image_embeds = vae.encode(
-                    batch["original_pixel_values"].to(weight_dtype)
-                ).latent_dist.mode()
+                if not args.avg_exo:
+                    original_image_embeds = vae.encode(
+                        batch["original_pixel_values"].to(weight_dtype)
+                    ).latent_dist.mode()
+                else:
+                    # Add the exo pixel values as base image
+                    original_image_embeds = []
+                    for original_pixel_value in batch['original_pixel_values']:
+                        original_image_embeds_per_batch = vae.encode(
+                            original_pixel_value.to(weight_dtype)
+                        ).latent_dist.mode()
+                        original_image_embed = torch.sum(original_image_embeds_per_batch, dim=0)
+                        original_image_embeds.append(original_image_embed)  
+                    original_image_embeds = torch.stack(original_image_embeds)
+
                 # original_image_embeds = latent_qformer(batch['exo_pixel_values'], batch['input_ids'])
 
                 # Conditioning dropout to support classifier-free guidance during inference. For more details
@@ -1208,7 +1493,8 @@ def main():
                     else:
                         ema_unet.store(unet.module.parameters())
                         ema_unet.copy_to(unet.module.parameters())
-                pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
+                insp2p_pipeline = StableDiffusionInstructPix2PixPipeline if not args.avg_exo else StableDiffusionInstructPix2PixPipeline_AvgExo
+                pipeline = insp2p_pipeline.from_pretrained(
                     args.pretrained_model_name_or_path,
                     unet=unet if accelerator.num_processes == 1 else unet.module,
                     revision=args.revision,
@@ -1231,7 +1517,10 @@ def main():
                         for bn in tqdm(range(len(batch['text'][:10])), desc="Generating train images"):
                             # latent = latent_qformer(batch['exo_pixel_values'][bn].unsqueeze(0), batch['input_ids'][bn].unsqueeze(0))
                             # original_image = pipeline.numpy_to_pil(pipeline.decode_latents(latent))[0]
-                            original_image = batch['original_image'][bn].resize((args.resolution, args.resolution))
+                            if args.avg_exo:
+                               original_image = [bimg.resize((args.resolution, args.resolution)) for bimg in batch['original_image'][bn]]
+                            else:
+                                original_image = batch['original_image'][bn].resize((args.resolution, args.resolution))
                             edited_image = (
                                 pipeline(
                                     batch['text'][bn],
@@ -1243,6 +1532,8 @@ def main():
                                 ).images[0]
                             )
                             h_concat = PIL.Image.new('RGB', (edited_image.width * 3, edited_image.height))
+                            if args.avg_exo:
+                                original_image = original_image[0]
                             h_concat.paste(original_image, (0, 0))
                             h_concat.paste(edited_image, (edited_image.width, 0))
                             h_concat.paste(batch['image'][bn].resize((args.resolution, args.resolution)), (edited_image.width*2, 0))
@@ -1264,8 +1555,10 @@ def main():
                         with torch.no_grad():
                             for bn in tqdm(range(len(vbatch['text'][:10])), desc="Generating val images"):
                                 # latent = latent_qformer(batch['exo_pixel_values'][bn].unsqueeze(0), batch['input_ids'][bn].unsqueeze(0))
-                                # original_image = pipeline.numpy_to_pil(pipeline.decode_latents(latent))[0]
-                                original_image = vbatch['original_image'][bn].resize((args.resolution, args.resolution))
+                                if args.avg_exo:
+                                    original_image = [bimg.resize((args.resolution, args.resolution)) for bimg in batch['original_image'][bn]]
+                                else:
+                                    original_image = vbatch['original_image'][bn].resize((args.resolution, args.resolution))
                                 edited_image = (
                                     pipeline(
                                         vbatch['text'][bn],
@@ -1277,6 +1570,8 @@ def main():
                                     ).images[0]
                                 )
                                 h_concat = PIL.Image.new('RGB', (edited_image.width * 3, edited_image.height))
+                                if args.avg_exo:
+                                    original_image = original_image[0]
                                 h_concat.paste(original_image, (0, 0))
                                 h_concat.paste(edited_image, (edited_image.width, 0))
                                 h_concat.paste(vbatch['image'][bn].resize((args.resolution, args.resolution)), (edited_image.width*2, 0))

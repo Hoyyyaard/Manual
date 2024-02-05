@@ -25,6 +25,3 @@ if IS_STAGE2:
 
 PRECISION = torch.bfloat16
 TRAINABLE_PRECISION = torch.float32
-
-IS_MANUAL = os.getenv("IS_MANUAL", False)
-ONLY_TRAIN = os.getenv("ONLY_TRAIN", False)
