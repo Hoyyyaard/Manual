@@ -22,7 +22,7 @@ import math
 import os
 from pathlib import Path
 from typing import Optional
-
+from accelerate import init_empty_weights
 import accelerate
 import datasets
 import diffusers
@@ -149,6 +149,7 @@ class StableDiffusionInstructPix2PixPipeline_AvgExo(StableDiffusionInstructPix2P
         return_dict: bool = True,
         callback_on_step_end = None,
         callback_on_step_end_tensor_inputs = ["latents"],
+        args = None,
         **kwargs,
     ):
 
@@ -224,6 +225,9 @@ class StableDiffusionInstructPix2PixPipeline_AvgExo(StableDiffusionInstructPix2P
             device,
             self.do_classifier_free_guidance,
         )
+
+        if args.zero_base:
+            image_latents = torch.zeros_like(image_latents)
 
         height, width = image_latents.shape[-2:]
         height = height * self.vae_scale_factor
@@ -346,67 +350,6 @@ class StableDiffusionInstructPix2PixPipeline_AvgExo(StableDiffusionInstructPix2P
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
 
-class Latent_Qformer(nn.Module):
-    def __init__(self, vocab_size, image_size=512):
-        super().__init__()
-
-        self.visual_encoder, self.ln_vision = Blip2Base.init_vision_encoder(
-            'eva_clip_g', image_size, 0, False, 'fp16'
-        )
-        for name, param in self.visual_encoder.named_parameters():
-            param.requires_grad = False
-        self.visual_encoder = self.visual_encoder.eval()
-        self.visual_encoder.train = disabled_train
-        for name, param in self.ln_vision.named_parameters():
-            param.requires_grad = False
-        self.ln_vision = self.ln_vision.eval()
-        self.ln_vision.train = disabled_train
-
-        # 64 querys & 1408 vision fts dim
-        self.qformer, self.query_tokens = Blip2Base.init_Qformer(64, 1408, vocab_size=vocab_size)
-        # 第一个卷积层：输入通道为768，输出通道为256，卷积核大小为3x3，填充为1
-        self.conv1 = nn.Conv2d(768, 256, kernel_size=3, padding=1)
-        # 第一个上采样层：使用反卷积操作，将特征图的尺寸增大2倍
-        self.upsample1 = nn.ConvTranspose2d(256, 256, kernel_size=4, stride=2, padding=1)
-        # 第二个卷积层：输入通道为256，输出通道为128，卷积核大小为3x3，填充为1
-        self.conv2 = nn.Conv2d(256, 128, kernel_size=3, padding=1)
-        # 第二个上采样层：使用反卷积操作，将特征图的尺寸增大2倍
-        self.upsample2 = nn.ConvTranspose2d(128, 128, kernel_size=4, stride=2, padding=1)
-        # 第三个卷积层：输入通道为128，输出通道为4，卷积核大小为3x3，填充为1
-        self.conv3 = nn.Conv2d(128, 4, kernel_size=3, padding=1)
-        # 第三个上采样层：使用反卷积操作，将特征图的尺寸增大2倍
-        self.upsample3 = nn.ConvTranspose2d(4, 4, kernel_size=4, stride=2, padding=1)
-
-    def forward(self, images, input_ids):
-        B, _, C, H, W = images.shape
-        images = images.reshape(-1, C, H, W)
-        # [bs*img_num, patch_num, 1408]
-        image_embeds = self.ln_vision(self.visual_encoder(images))
-        # [bs, img_num*patch_num, 1408]
-        image_embeds = image_embeds.reshape(B, -1, image_embeds.shape[-1])
-
-        query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
-        # input_ids = input_ids.repeat(4, 1)
-        # query_outputs.last_hidden_state [view, 32+len(tokens(instr)), 768]
-        query_outputs = self.qformer.bert(
-            input_ids=input_ids,
-            # attention_mask=attention_mask,  
-            query_embeds=query_tokens,
-            encoder_hidden_states=image_embeds,
-            encoder_attention_mask=None,
-            return_dict=True,
-        )
-        # Use only query output
-        x = query_outputs.last_hidden_state[:, :query_tokens.shape[1], :]
-        x = x.reshape(-1, 8, 8, 768).permute(0, 3, 1, 2)
-        x = self.conv1(x)
-        x = self.upsample1(x)
-        x = self.conv2(x)
-        x = self.upsample2(x)
-        x = self.conv3(x)
-        x = self.upsample3(x)
-
-        return x
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -622,6 +565,14 @@ def parse_args():
     )
     parser.add_argument(
         "--avg_exo",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--from_scratch",
+        action="store_true",
+    )
+    parser.add_argument(
+        "--zero_base",
         action="store_true",
     )
     parser.add_argument(
@@ -900,11 +851,20 @@ def main():
     vae = AutoencoderKL.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="vae", revision=args.revision
     )
-    unet = UNet2DConditionModel.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="unet",
-        revision=args.non_ema_revision,
-    )
+
+    if args.from_scratch:
+        with init_empty_weights():
+            unet = UNet2DConditionModel.from_pretrained(
+                    args.pretrained_model_name_or_path,
+                    subfolder="unet",
+                    revision=args.non_ema_revision,
+                )
+    else:
+        unet = UNet2DConditionModel.from_pretrained(
+                args.pretrained_model_name_or_path,
+                subfolder="unet",
+                revision=args.non_ema_revision,
+            )
 
     # latent_qformer = Latent_Qformer(vocab_size=tokenizer.vocab_size)
 
@@ -1378,6 +1338,9 @@ def main():
                         original_image_embeds.append(original_image_embed)  
                     original_image_embeds = torch.stack(original_image_embeds)
 
+                if args.zero_base:
+                    original_image_embeds = torch.zeros_like(original_image_embeds)
+
                 # original_image_embeds = latent_qformer(batch['exo_pixel_values'], batch['input_ids'])
 
                 # Conditioning dropout to support classifier-free guidance during inference. For more details
@@ -1529,6 +1492,7 @@ def main():
                                     image_guidance_scale=1.5,
                                     guidance_scale=7,
                                     generator=generator,
+                                    args=args
                                 ).images[0]
                             )
                             h_concat = PIL.Image.new('RGB', (edited_image.width * 3, edited_image.height))
@@ -1556,7 +1520,7 @@ def main():
                             for bn in tqdm(range(len(vbatch['text'][:10])), desc="Generating val images"):
                                 # latent = latent_qformer(batch['exo_pixel_values'][bn].unsqueeze(0), batch['input_ids'][bn].unsqueeze(0))
                                 if args.avg_exo:
-                                    original_image = [bimg.resize((args.resolution, args.resolution)) for bimg in batch['original_image'][bn]]
+                                    original_image = [bimg.resize((args.resolution, args.resolution)) for bimg in vbatch['original_image'][bn]]
                                 else:
                                     original_image = vbatch['original_image'][bn].resize((args.resolution, args.resolution))
                                 edited_image = (
@@ -1567,6 +1531,7 @@ def main():
                                         image_guidance_scale=1.5,
                                         guidance_scale=7,
                                         generator=generator,
+                                        args=args
                                     ).images[0]
                                 )
                                 h_concat = PIL.Image.new('RGB', (edited_image.width * 3, edited_image.height))

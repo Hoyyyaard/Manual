@@ -1,0 +1,1 @@
+/gpfs/u/home/AICD/AICDzhnf/scratch/x64/anaconda3/envs/manual/bin/python src/instrustionp2p_test.py --checkpoint_dir $1

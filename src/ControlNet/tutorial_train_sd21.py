@@ -19,7 +19,7 @@ from src.dataset import ControlNet_Finetune_Dataset
 NP = os.getenv("NP", 1)
 NN = int(os.getenv("NN", 1))
 
-opd = 'results/ControlNet/finetune_sd21_qformer'
+opd = 'results/ControlNet/res256'
 import torch
 # Configs
 
@@ -57,9 +57,11 @@ model.only_mid_control = only_mid_control
 
 # Misc
 dataset = ControlNet_Finetune_Dataset()
-dataloader = DataLoader(dataset, num_workers=0, batch_size=batch_size, shuffle=False)
+dataloader = DataLoader(dataset, num_workers=4, batch_size=batch_size, shuffle=False)
+val_dataset = ControlNet_Finetune_Dataset(split='val')
+val_dataloader = DataLoader(val_dataset, num_workers=4, batch_size=batch_size, shuffle=False)
 logger = ImageLogger(batch_frequency=logger_freq)
-trainer = pl.Trainer(gpus=NP, num_nodes=NN, resume_from_checkpoint=resume_path, precision=16, callbacks=[logger, pl.callbacks.ModelCheckpoint(every_n_train_steps=500, save_top_k=-1)], enable_checkpointing=True, accumulate_grad_batches=1, default_root_dir=opd, strategy="ddp")
+trainer = pl.Trainer(gpus=NP, num_nodes=NN, resume_from_checkpoint=resume_path, precision=16, callbacks=[logger, pl.callbacks.ModelCheckpoint(every_n_train_steps=10000, save_top_k=-1)], enable_checkpointing=True, accumulate_grad_batches=1, default_root_dir=opd, strategy="ddp")
 try:
     trainer.global_step = int(resume_path.split('/')[-1].split('-')[-1].split('=')[-1].split('.')[0])
 except Exception as e:
@@ -68,4 +70,4 @@ except Exception as e:
 
 
 # Train!
-trainer.fit(model, dataloader)
+trainer.fit(model, dataloader, val_dataloader)

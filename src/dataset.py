@@ -102,8 +102,10 @@ class ControlNet_Finetune_Dataset(Dataset):
 
         # Do not forget that OpenCV read images in BGR order.
         source = cv2.cvtColor(source, cv2.COLOR_BGR2RGB)
-        source = cv2.resize(source, target.shape[:2][::-1])
+        res = os.getenv("resolution", 256)
+        source = cv2.resize(source, (res,res))
         target = cv2.cvtColor(target, cv2.COLOR_BGR2RGB)
+        target = cv2.resize(target, (res,res))
 
         # Normalize source images to [0, 1].
         source = source.astype(np.float32) / 255.0
