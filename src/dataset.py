@@ -121,10 +121,11 @@ class Diffusion_Finetune_Dataset(Dataset):
         This dataset will leverage different preprocessed dataset:
             1. EgoExo4d_Finetune_Dataset
     '''
-    def __init__(self, split='train', preprocess_func=None, dataset_list= ['egoexo'], use_exo=True, avg_exo=False):
+    def __init__(self, split='train', preprocess_func=None, dataset_list= ['egoexo'], use_exo=True, avg_exo=False, res=256):
         self.EgoExo4d_Pretrain_dataset_path = os.path.join('datasets', 'EgoExo4d', 'preprocessed_episodes', split)
         self.Epic_Kitchen_Text_Image_Pairs_dataset_path = os.path.join('datasets', 'epic-kitchen', 'text_image_pairs', split)
         self.preprocess_func = preprocess_func
+        self.res = res
         self.episodes = []
         self.use_exo = use_exo
         self.avg_exo = avg_exo  
@@ -183,14 +184,14 @@ class Diffusion_Finetune_Dataset(Dataset):
     
     def __getitem__(self, i):
         image_p, text = self.episodes[i]['image_path'], self.episodes[i]['caption']
-        image = Image.open(image_p).convert("RGB")
+        image = Image.open(image_p).convert("RGB").resize((self.res, self.res))
         pixel_values, input_ids = self.preprocess_func(image, text)
         
         if self.use_exo:
             exo_path = self.episodes[i]['exo_path']
             exo_images = []
             for p in exo_path:
-                exo_images.append(Image.open(p).convert("RGB"))
+                exo_images.append(Image.open(p).convert("RGB").resize((self.res, self.res)))
             exo_pixel_values = []
             for exo in exo_images:
                 exo_pixel_values.append(self.preprocess_func(exo, text)[0])

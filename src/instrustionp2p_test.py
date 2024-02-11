@@ -101,30 +101,30 @@ val_dataloader = torch.utils.data.DataLoader(
     num_workers=0,
 )
 
-# unet = UNet2DConditionModel.from_pretrained(
-#     'timbrooks/instruct-pix2pix',
-#     subfolder="unet",
-# )
-# accelerator = Accelerator(mixed_precision='fp16')
+unet = UNet2DConditionModel.from_pretrained(
+    'timbrooks/instruct-pix2pix',
+    subfolder="unet",
+)
+accelerator = Accelerator(mixed_precision='fp16')
 
-# def load_model_hook(models, input_dir):
+def load_model_hook(models, input_dir):
 
-#     for i in range(len(models)):
-#         # pop models so that they are not loaded again
-#         model = models.pop()
+    for i in range(len(models)):
+        # pop models so that they are not loaded again
+        model = models.pop()
 
-#         # load diffusers style into model
-#         load_model = UNet2DConditionModel.from_pretrained(
-#             input_dir, subfolder="unet"
-#         )
-#         model.register_to_config(**load_model.config)
+        # load diffusers style into model
+        load_model = UNet2DConditionModel.from_pretrained(
+            input_dir, subfolder="unet"
+        )
+        model.register_to_config(**load_model.config)
 
-#         model.load_state_dict(load_model.state_dict())
-#         del load_model
+        model.load_state_dict(load_model.state_dict())
+        del load_model
 
-# accelerator.register_load_state_pre_hook(load_model_hook)
+accelerator.register_load_state_pre_hook(load_model_hook)
 
-# unet = accelerator.prepare(unet)
+unet = accelerator.prepare(unet)
 
 # Get the most recent checkpoint
 dirs = os.listdir(args.checkpoint_dir)
@@ -145,11 +145,24 @@ pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
                 'timbrooks/instruct-pix2pix',
                 unet=unet.to(torch.float16) ,
                 torch_dtype=torch.float16,
-                device_map="auto"
+                
             )
 del unet
+pipeline = pipeline.to('cuda')
+# pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
+#                 'timbrooks/instruct-pix2pix',
+#                 torch_dtype=torch.float16,
+#             )
 # pipeline = pipeline.to('cuda')
-
+# edited_image = pipeline(
+#                     'Squeezes the pack of noodles with his hands',
+#                     image=PIL.Image.open('datasets/EgoExo4d/preprocessed_episodes/train/fair_cooking_06_2/20/cam03.png').resize((256,256)),
+#                     num_inference_steps=20,
+#                     image_guidance_scale=1.5,
+#                     guidance_scale=7,
+#                 ).images[0]
+# edited_image.save('test.png')
+# assert False
 
 for batch in train_dataloader:
     with torch.no_grad():
@@ -164,7 +177,7 @@ for batch in train_dataloader:
                     batch['text'][bn],
                     image=original_image,
                     num_inference_steps=20,
-                    image_guidance_scale=1.5,
+                    image_guidance_scale=7,
                     guidance_scale=7,
                 ).images[0]
             )

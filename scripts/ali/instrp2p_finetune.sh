@@ -1,7 +1,7 @@
 export MODEL_NAME="timbrooks/instruct-pix2pix"
 source activate minigpt5
-python -m accelerate.commands.launch src/finetune_instrp2p.py \
-  --pretrained_model_name_or_path=$MODEL_NAME \
+python -m accelerate.commands.launch src/finetune_image_to_image.py \
+  --pipeline insp2p \
   --use_ema \
   --resolution=256 --center_crop \
   --train_batch_size=32 \
