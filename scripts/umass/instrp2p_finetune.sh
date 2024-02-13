@@ -2,7 +2,6 @@ export MODEL_NAME="timbrooks/instruct-pix2pix"
 source activate minigpt5
 python -m accelerate.commands.launch src/finetune_image_to_image.py \
   --pipeline insp2p \
-  --use_ema \
   --resolution=256 --center_crop \
   --train_batch_size=32 \
   --gradient_accumulation_steps=4 \
@@ -17,7 +16,7 @@ python -m accelerate.commands.launch src/finetune_image_to_image.py \
   --max_grad_norm=1 \
   --lr_scheduler="constant" \
   --lr_warmup_steps=0 \
-  --output_dir=results/diffusion/instrp2p_res256_train \
+  --output_dir=results/diffusion/instrp2p_res256_train_woema \
   --report_to=tensorboard \
   --val \
   --resume_from_checkpoint latest \

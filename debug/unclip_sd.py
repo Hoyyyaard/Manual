@@ -1,13 +1,22 @@
-from diffusers import DiffusionPipeline
-from diffusers.utils import load_image
+import requests
 import torch
+from PIL import Image
+from io import BytesIO
 
-pipe = DiffusionPipeline.from_pretrained("stabilityai/stable-diffusion-2-1-unclip-small", torch_dtype=torch.float16)
-pipe.to("cuda")
+from diffusers import StableUnCLIPImg2ImgPipeline
 
-# get image
-url = "https://huggingface.co/datasets/hf-internal-testing/diffusers-images/resolve/main/stable_unclip/tarsila_do_amaral.png"
-image = load_image(url)
+pipe = StableUnCLIPImg2ImgPipeline.from_pretrained(
+    "stabilityai/stable-diffusion-2-1-unclip-small", torch_dtype=torch.float16
+)  
+pipe = pipe.to("cuda")
 
-# run image variation
-image = pipe(image).images[0]
+url = "https://raw.githubusercontent.com/CompVis/stable-diffusion/main/assets/stable-samples/img2img/sketch-mountains-input.jpg"
+
+response = requests.get(url)
+init_image = Image.open(BytesIO(response.content)).convert("RGB")
+init_image = init_image.resize((256, 256))
+
+prompt = "A fantasy landscape, trending on artstation"
+
+images = pipe(init_image, prompt=prompt).images
+images[0].save("fantasy_landscape.png")

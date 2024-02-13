@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 from typing import Optional
 from accelerate import init_empty_weights
+import shutil
 import accelerate
 import datasets
 import diffusers
@@ -57,6 +58,11 @@ from packaging import version
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import CLIPTextModel, CLIPTokenizer, CLIPVisionModel, AutoProcessor
+from peft import LoraConfig
+from peft.utils import get_peft_model_state_dict
+from diffusers.training_utils import cast_training_params, compute_snr
+from diffusers.utils import check_min_version, convert_state_dict_to_diffusers, is_wandb_available
+
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
 check_min_version("0.15.0.dev0")
@@ -364,6 +370,12 @@ def parse_args():
     parser.add_argument(
         "--lora",
         action="store_true",
+    )
+    parser.add_argument(
+        "--rank",
+        type=int,
+        default=4,
+        help=("The dimension of the LoRA update matrices."),
     )
     parser.add_argument(
         "--revision",
@@ -695,7 +707,7 @@ def parse_args():
     parser.add_argument(
         "--checkpoints_total_limit",
         type=int,
-        default=None,
+        default=2,
         help=(
             "Max number of checkpoints to store. Passed as `total_limit` to the `Accelerator` `ProjectConfiguration`."
             " See Accelerator::save_state https://huggingface.co/docs/accelerate/package_reference/accelerator#accelerate.Accelerator.save_state"
@@ -1071,6 +1083,14 @@ def main():
         pretrained_model_name_or_path, subfolder="vae", revision=args.revision
     )
 
+    # For mixed precision training we cast the text_encoder and vae weights to half-precision
+    # as these models are only used for inference, keeping weights in full precision is not required.
+    weight_dtype = torch.float32
+    if accelerator.mixed_precision == "fp16":
+        weight_dtype = torch.float16
+    elif accelerator.mixed_precision == "bf16":
+        weight_dtype = torch.bfloat16
+
     if args.pipeline == 'unclip':
         feature_extractor = CLIPImageProcessor.from_pretrained(
             pretrained_model_name_or_path,
@@ -1092,6 +1112,8 @@ def main():
             subfolder="image_noising_scheduler",
             revision=args.revision,
         )
+        image_encoder.requires_grad_(False)
+        image_encoder.to(accelerator.device, dtype=weight_dtype)
     else:
         feature_extractor = None
         image_encoder = None
@@ -1117,7 +1139,24 @@ def main():
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
-    image_encoder.requires_grad_(False)
+    
+
+    if args.lora:
+    # Add adapter and make sure the trainable params are in float32.
+        print('----------------Use lora finetune----------------')
+        for param in unet.parameters():
+            param.requires_grad_(False)
+
+        unet_lora_config = LoraConfig(
+            r=args.rank,
+            lora_alpha=args.rank,
+            init_lora_weights="gaussian",
+            target_modules=["to_k", "to_q", "to_v", "to_out.0"],
+        )
+        unet.add_adapter(unet_lora_config)
+        if args.mixed_precision == "fp16":
+            # only upcast trainable parameters (LoRA) into fp32
+            cast_training_params(unet, dtype=torch.float32)
 
     # Create EMA for the unet.
     if args.use_ema:
@@ -1141,42 +1180,42 @@ def main():
             )
 
     # `accelerate` 0.16.0 will have better support for customized saving
-    if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
-        # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
-        def save_model_hook(models, weights, output_dir):
-            if args.use_ema:
-                ema_unet.save_pretrained(os.path.join(output_dir, "unet_ema"))
+    # if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
+    #     # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
+    #     def save_model_hook(models, weights, output_dir):
+    #         if args.use_ema:
+    #             ema_unet.save_pretrained(os.path.join(output_dir, "unet_ema"))
 
-            for i, model in enumerate(models):
-                model.save_pretrained(os.path.join(output_dir, "unet"))
+    #         for i, model in enumerate(models):
+    #             model.save_pretrained(os.path.join(output_dir, "unet"))
 
-                # make sure to pop weight so that corresponding model is not saved again
-                weights.pop()
+    #             # make sure to pop weight so that corresponding model is not saved again
+    #             weights.pop()
 
-        def load_model_hook(models, input_dir):
-            if args.use_ema:
-                load_model = EMAModel.from_pretrained(
-                    os.path.join(input_dir, "unet_ema"), UNet2DConditionModel
-                )
-                ema_unet.load_state_dict(load_model.state_dict())
-                ema_unet.to(accelerator.device)
-                del load_model
+    #     def load_model_hook(models, input_dir):
+    #         if args.use_ema:
+    #             load_model = EMAModel.from_pretrained(
+    #                 os.path.join(input_dir, "unet_ema"), UNet2DConditionModel
+    #             )
+    #             ema_unet.load_state_dict(load_model.state_dict())
+    #             ema_unet.to(accelerator.device)
+    #             del load_model
 
-            for i in range(len(models)):
-                # pop models so that they are not loaded again
-                model = models.pop()
+    #         for i in range(len(models)):
+    #             # pop models so that they are not loaded again
+    #             model = models.pop()
 
-                # load diffusers style into model
-                load_model = UNet2DConditionModel.from_pretrained(
-                    input_dir, subfolder="unet"
-                )
-                model.register_to_config(**load_model.config)
+    #             # load diffusers style into model
+    #             load_model = UNet2DConditionModel.from_pretrained(
+    #                 input_dir, subfolder="unet"
+    #             )
+    #             model.register_to_config(**load_model.config)
 
-                model.load_state_dict(load_model.state_dict())
-                del load_model
+    #             model.load_state_dict(load_model.state_dict())
+    #             del load_model
 
-        accelerator.register_save_state_pre_hook(save_model_hook)
-        accelerator.register_load_state_pre_hook(load_model_hook)
+    #     accelerator.register_save_state_pre_hook(save_model_hook)
+    #     accelerator.register_load_state_pre_hook(load_model_hook)
 
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
@@ -1207,8 +1246,10 @@ def main():
     else:
         optimizer_cls = torch.optim.AdamW
 
+    optimizer_parameters = filter(lambda p: p.requires_grad, unet.parameters()) if args.lora else unet.parameters()
+
     optimizer = optimizer_cls(
-        unet.parameters(),
+        optimizer_parameters,
         lr=args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
@@ -1254,8 +1295,8 @@ def main():
         return train_transforms(image), tokenize_captions(text)
     print("Loading dataset...")
     from dataset import Diffusion_Finetune_Dataset
-    train_dataset = Diffusion_Finetune_Dataset(preprocess_func=preprocess_func, use_exo=args.use_exo, avg_exo=args.avg_exo, split='train')
-    val_dataset = Diffusion_Finetune_Dataset(preprocess_func=preprocess_func, use_exo=args.use_exo, avg_exo=args.avg_exo, split='val')
+    train_dataset = Diffusion_Finetune_Dataset(preprocess_func=preprocess_func, use_exo=args.use_exo, avg_exo=args.avg_exo, split='train', res=args.resolution)
+    val_dataset = Diffusion_Finetune_Dataset(preprocess_func=preprocess_func, use_exo=args.use_exo, avg_exo=args.avg_exo, split='val', res=args.resolution)
 
     # DataLoaders creation:
     train_dataloader = torch.utils.data.DataLoader(
@@ -1296,18 +1337,10 @@ def main():
     if args.use_ema:
         ema_unet.to(accelerator.device)
 
-    # For mixed precision training we cast the text_encoder and vae weights to half-precision
-    # as these models are only used for inference, keeping weights in full precision is not required.
-    weight_dtype = torch.float32
-    if accelerator.mixed_precision == "fp16":
-        weight_dtype = torch.float16
-    elif accelerator.mixed_precision == "bf16":
-        weight_dtype = torch.bfloat16
-
     # Move text_encode and vae to gpu and cast to weight_dtype
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     vae.to(accelerator.device, dtype=weight_dtype)
-    image_encoder.to(accelerator.device, dtype=weight_dtype)
+    
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(
@@ -1443,10 +1476,14 @@ def main():
                 # Backpropagate
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    if accelerator.num_processes == 1:
-                        accelerator.clip_grad_norm_(unet.parameters(), args.max_grad_norm)
-                    else:
-                        accelerator.clip_grad_norm_(unet.module.parameters(), args.max_grad_norm)
+                    # if accelerator.num_processes == 1:
+                    #     clip_param = filter(lambda p: p.requires_grad, unet.parameters()) if args.lora else unet.parameters()
+                    #     accelerator.clip_grad_norm_(clip_param, args.max_grad_norm)
+                    # else:
+                    #     clip_param = filter(lambda p: p.requires_grad, unet.module.parameters()) if args.lora else unet.module.parameters()
+                    #     accelerator.clip_grad_norm_(clip_param, args.max_grad_norm)
+                    clip_param = filter(lambda p: p.requires_grad, unet.parameters()) if args.lora else unet.parameters()
+                    accelerator.clip_grad_norm_(clip_param, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -1454,10 +1491,7 @@ def main():
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
                 if args.use_ema:
-                    if accelerator.num_processes == 1:
-                        ema_unet.step(unet.parameters())
-                    else:
-                        ema_unet.step(unet.module.parameters())
+                    ema_unet.step(unet.parameters())
                 progress_bar.update(1)
                 global_step += 1
                 accelerator.log({"train_loss": train_loss}, step=global_step)
@@ -1472,16 +1506,46 @@ def main():
 
             if global_step >= args.max_train_steps:
                 break
-
-            
         
         if epoch % args.checkpointing_steps == 0:
             if accelerator.is_main_process:
+                # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
+                if args.checkpoints_total_limit is not None:
+                    checkpoints = os.listdir(args.output_dir)
+                    checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
+                    checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
+
+                    # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
+                    if len(checkpoints) >= args.checkpoints_total_limit:
+                        num_to_remove = len(checkpoints) - args.checkpoints_total_limit + 1
+                        removing_checkpoints = checkpoints[0:num_to_remove]
+
+                        logger.info(
+                            f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
+                        )
+                        logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
+
+                        for removing_checkpoint in removing_checkpoints:
+                            removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
+                            shutil.rmtree(removing_checkpoint)
+
                 save_path = os.path.join(
                     args.output_dir, f"checkpoint-{global_step}-{epoch}"
                 )
                 accelerator.save_state(save_path)
                 logger.info(f"Saved state to {save_path}")
+
+                if args.lora:
+                    unwrapped_unet = accelerator.unwrap_model(unet)
+                    unet_lora_state_dict = convert_state_dict_to_diffusers(
+                        get_peft_model_state_dict(unwrapped_unet)
+                    )
+
+                    pipeline_class.save_lora_weights(
+                        save_directory=save_path,
+                        unet_lora_layers=unet_lora_state_dict,
+                        safe_serialization=True,
+                    )
         
         if accelerator.is_main_process:
             if (
@@ -1490,18 +1554,16 @@ def main():
                 logger.info(
                     f"Running validation... \n "
                 )
+                unet = accelerator.unwrap_model(unet)
                 # create pipeline
                 if args.use_ema:
                     # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
-                    if accelerator.num_processes == 1:
-                        ema_unet.store(unet.parameters())
-                        ema_unet.copy_to(unet.parameters())
-                    else:
-                        ema_unet.store(unet.module.parameters())
-                        ema_unet.copy_to(unet.module.parameters())
+                    ema_unet.store(unet.parameters())
+                    ema_unet.copy_to(unet.parameters())
+
                 pipeline = pipeline_class.from_pretrained(
                     pretrained_model_name_or_path,
-                    unet=unet if accelerator.num_processes == 1 else unet.module,
+                    unet=unet ,
                     revision=args.revision,
                     torch_dtype=weight_dtype,
                 )
@@ -1571,10 +1633,8 @@ def main():
                         tracker.log({"validation": wandb_table})
                 if args.use_ema:
                     # Switch back to the original UNet parameters.
-                    if accelerator.num_processes == 1:
-                        ema_unet.restore(unet.parameters())
-                    else:
-                        ema_unet.restore(unet.module.parameters())
+                    ema_unet.restore(unet.parameters())
+
 
                 del pipeline
                 torch.cuda.empty_cache()
@@ -1584,16 +1644,14 @@ def main():
     if accelerator.is_main_process:
         unet = accelerator.unwrap_model(unet)
         if args.use_ema:
-            if accelerator.num_processes == 1:
-                ema_unet.copy_to(unet.parameters())
-            else:
-                ema_unet.copy_to(unet.module.parameters())
+            ema_unet.copy_to(unet.parameters())
+
 
         pipeline = StableDiffusionInstructPix2PixPipeline.from_pretrained(
             args.pretrained_model_name_or_path,
             text_encoder=text_encoder,
             vae=vae,
-            unet=unet if accelerator.num_processes == 1 else unet.module,
+            unet=unet ,
             revision=args.revision,
         )
         pipeline.save_pretrained(args.output_dir)
