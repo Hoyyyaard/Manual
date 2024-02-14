@@ -1,8 +1,9 @@
 source activate minigpt5
 python -m accelerate.commands.launch src/finetune_image_to_image.py \
-  --pipeline insp2p \
-  --resolution=256 --center_crop \
-  --train_batch_size=32 \
+  --pipeline qformer \
+  --resolution=768 --center_crop \
+  --from_scratch \
+  --train_batch_size=16 \
   --gradient_accumulation_steps=4 \
   --gradient_checkpointing \
   --mixed_precision="fp16" \
@@ -15,7 +16,7 @@ python -m accelerate.commands.launch src/finetune_image_to_image.py \
   --max_grad_norm=1 \
   --lr_scheduler="constant" \
   --lr_warmup_steps=0 \
-  --output_dir=results/diffusion/instrp2p_res256_train \
+  --output_dir=results/diffusion/qformer_res758_train_woema_fromscratch \
   --report_to=tensorboard \
   --val \
   --resume_from_checkpoint latest \

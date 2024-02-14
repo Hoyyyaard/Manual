@@ -1,5 +1,5 @@
 source activate minigpt5
-python -m accelerate.commands.launch src/finetune_image_to_image.py \
+python -m accelerate.commands.launch --main_process_port 24344 src/finetune_image_to_image.py \
   --pipeline insp2p \
   --resolution=256 --center_crop \
   --train_batch_size=32 \
@@ -7,6 +7,7 @@ python -m accelerate.commands.launch src/finetune_image_to_image.py \
   --gradient_checkpointing \
   --mixed_precision="fp16" \
   --use_exo \
+  --lora \
   --checkpointing_steps 10 \
   --validation_epochs 10 \
   --max_train_steps=15000 \
@@ -15,7 +16,7 @@ python -m accelerate.commands.launch src/finetune_image_to_image.py \
   --max_grad_norm=1 \
   --lr_scheduler="constant" \
   --lr_warmup_steps=0 \
-  --output_dir=results/diffusion/instrp2p_res256_train \
+  --output_dir=results/diffusion/instrp2p_res256_train_lora \
   --report_to=tensorboard \
   --val \
   --resume_from_checkpoint latest \

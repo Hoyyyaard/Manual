@@ -43,6 +43,7 @@ from transformers import CLIPImageProcessor, CLIPTextModel, CLIPTokenizer, CLIPV
 from diffusers import (AutoencoderKL, DDPMScheduler,
                        StableDiffusionInstructPix2PixPipeline,
                        StableUnCLIPImg2ImgPipeline,
+                       StableDiffusionPipeline,
                        UNet2DConditionModel,)
 from diffusers.pipelines.stable_diffusion.stable_unclip_image_normalizer import StableUnCLIPImageNormalizer
 from diffusers.pipelines.stable_diffusion.pipeline_output import StableDiffusionPipelineOutput
@@ -81,9 +82,51 @@ import sys
 sys.path.append(base_dir)
 from minigpt4.models.blip2 import Blip2Base, disabled_train
 from transformers import LlamaTokenizer
+from accelerate import DistributedDataParallelKwargs
 
 
-class StableDiffusionInstructPix2PixPipeline_AvgExo(StableDiffusionInstructPix2PixPipeline):
+class Latent_Qformer(nn.Module):
+    def __init__(self, vocab_size, image_size=512):
+        super().__init__()
+
+        self.visual_encoder, self.ln_vision = Blip2Base.init_vision_encoder(
+            'eva_clip_g', image_size, 0, False, 'fp16'
+        )
+        for name, param in self.visual_encoder.named_parameters():
+            param.requires_grad = False
+        self.visual_encoder = self.visual_encoder.eval()
+        self.visual_encoder.train = disabled_train
+        for name, param in self.ln_vision.named_parameters():
+            param.requires_grad = False
+        self.ln_vision = self.ln_vision.eval()
+        self.ln_vision.train = disabled_train
+
+        # 64 querys & 768 vision fts dim
+        self.qformer, self.query_tokens = Blip2Base.init_Qformer(64, 1408, vocab_size=vocab_size)
+        self.ln_i2t = nn.Linear(768, 1024)
+
+        del self.qformer.cls.predictions.decoder
+
+    def forward(self, images, input_ids):
+        image_embeds = self.ln_vision(self.visual_encoder(images))
+        query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
+        # query_outputs.last_hidden_state [view, 32+len(tokens(instr)), 768]
+        query_outputs = self.qformer.bert(
+            input_ids=input_ids,
+            # attention_mask=attention_mask,  
+            query_embeds=query_tokens,
+            encoder_hidden_states=image_embeds,
+            encoder_attention_mask=None,
+            return_dict=True,
+        )
+        # Use only query output
+        x = query_outputs.last_hidden_state[:, :query_tokens.shape[1], :]
+        x = self.ln_i2t(x)
+        return x
+
+
+
+class StableDiffusionQformerPipeline(StableDiffusionPipeline):
     
     def prepare_image_latents(
         self, images, batch_size, num_images_per_prompt, dtype, device, do_classifier_free_guidance, generator=None
@@ -356,6 +399,7 @@ class StableDiffusionInstructPix2PixPipeline_AvgExo(StableDiffusionInstructPix2P
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Simple example of a training script for InstructPix2Pix."
@@ -365,7 +409,7 @@ def parse_args():
         type=str,
         default='insp2p',
         required=True,
-        choices=["insp2p", "unclip"],
+        choices=["insp2p", "unclip", "qformer"],
     )
     parser.add_argument(
         "--lora",
@@ -754,7 +798,7 @@ def download_image(url):
     image = image.convert("RGB")
     return image
 
-def insp2p_forward(unet, batch, args, vae, weight_dtype, bsz, latents, generator, text_encoder, tokenize_captions, accelerator, noisy_latents, timesteps, encoder_hidden_states, feature_extractor, image_encoder, image_normalizer, image_noising_scheduler):
+def insp2p_forward(unet, batch, args, vae, weight_dtype, bsz, latents, generator, text_encoder, tokenize_captions, accelerator, noisy_latents, timesteps, encoder_hidden_states, feature_extractor, image_encoder, image_normalizer, image_noising_scheduler, qformer):
     # Add the exo pixel values as base image
     original_image_embeds = vae.encode(
         batch["original_pixel_values"].to(weight_dtype)
@@ -808,7 +852,7 @@ def insp2p_forward(unet, batch, args, vae, weight_dtype, bsz, latents, generator
 
     return model_pred
 
-def insp2p_eval(args, batch, pipeline, generator, bn):
+def insp2p_eval(args, batch, pipeline, generator, bn, qformer):
 
     # original_image = batch['original_image'][bn].resize((args.resolution, args.resolution))
     edited_image = (
@@ -825,7 +869,7 @@ def insp2p_eval(args, batch, pipeline, generator, bn):
 
     return edited_image, batch['original_image'][bn]
 
-def unclip_forward(unet, batch, args, vae, weight_dtype, bsz, latents, generator, text_encoder, tokenize_captions, accelerator, noisy_latents, timesteps, encoder_hidden_states, feature_extractor, image_encoder, image_normalizer, image_noising_scheduler):
+def unclip_forward(unet, batch, args, vae, weight_dtype, bsz, latents, generator, text_encoder, tokenize_captions, accelerator, noisy_latents, timesteps, encoder_hidden_states, feature_extractor, image_encoder, image_normalizer, image_noising_scheduler, qformer):
     
     def noise_image_embeddings(
         image_embeds: torch.Tensor,
@@ -978,12 +1022,34 @@ def unclip_forward(unet, batch, args, vae, weight_dtype, bsz, latents, generator
 
     return model_pred
 
-def unclip_eval(args, batch, pipeline, generator, bn):
+def unclip_eval(args, batch, pipeline, generator, bn, qformer):
     # original_image = batch['original_image'][bn].resize((args.resolution, args.resolution))
     edited_image = (
         pipeline(
             batch['original_image'][bn],
             prompt=batch['text'][bn],
+        ).images[0]
+    )
+
+    return edited_image, batch['original_image'][bn]
+
+def qformer_forward(unet, batch, args, vae, weight_dtype, bsz, latents, generator, text_encoder, tokenize_captions, accelerator, noisy_latents, timesteps, encoder_hidden_states, feature_extractor, image_encoder, image_normalizer, image_noising_scheduler, qformer):
+
+    encoder_hidden_states = qformer(batch["original_pixel_values"].to(weight_dtype), batch["input_ids"])
+
+    # Predict the noise residual and compute loss
+    model_pred = unet(
+        noisy_latents, timesteps, encoder_hidden_states
+    ).sample
+
+    return model_pred
+
+def qformer_eval(args, batch, pipeline, generator, bn, qformer):
+    # original_image = batch['original_image'][bn].resize((args.resolution, args.resolution))
+    prompt_embeds = qformer(batch["original_pixel_values"], batch['input_ids'])
+    edited_image = (
+        pipeline(
+            prompt_embeds=prompt_embeds,
         ).images[0]
     )
 
@@ -1001,6 +1067,10 @@ def main():
                             'hf':'stabilityai/stable-diffusion-2-1-unclip', 
                             'method': unclip_forward,
                             'eval_method': unclip_eval},
+                'qformer' : {'class': StableDiffusionPipeline,
+                            'hf':'stabilityai/stable-diffusion-2-1', 
+                            'method': qformer_forward,
+                            'eval_method': qformer_eval}
                 }
 
 
@@ -1030,11 +1100,13 @@ def main():
         total_limit=args.checkpoints_total_limit,
         project_dir=logging_dir,
     )
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
         log_with=args.report_to,
         project_config=accelerator_project_config,
+        kwargs_handlers=[ddp_kwargs]
     )
 
     generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
@@ -1119,6 +1191,7 @@ def main():
         image_encoder = None
         image_normalizer = None
         image_noising_scheduler = None
+    latent_qformer = None
 
     if args.from_scratch:
         with init_empty_weights():
@@ -1134,13 +1207,13 @@ def main():
                 revision=args.non_ema_revision,
             )
 
-    # latent_qformer = Latent_Qformer(vocab_size=tokenizer.vocab_size)
+    if args.pipeline == 'qformer':
+        latent_qformer = Latent_Qformer(vocab_size=tokenizer.vocab_size, image_size=args.resolution)
 
     # Freeze vae and text_encoder
     vae.requires_grad_(False)
     text_encoder.requires_grad_(False)
     
-
     if args.lora:
     # Add adapter and make sure the trainable params are in float32.
         print('----------------Use lora finetune----------------')
@@ -1248,6 +1321,9 @@ def main():
 
     optimizer_parameters = filter(lambda p: p.requires_grad, unet.parameters()) if args.lora else unet.parameters()
 
+    if args.pipeline == 'qformer':
+        optimizer_parameters = list(optimizer_parameters) + list(latent_qformer.parameters())
+
     optimizer = optimizer_cls(
         optimizer_parameters,
         lr=args.learning_rate,
@@ -1330,9 +1406,14 @@ def main():
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
-    unet, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader,val_dataloader, lr_scheduler
-    )
+    if args.pipeline == 'qformer':
+        unet, latent_qformer, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
+            unet, latent_qformer, optimizer, train_dataloader,val_dataloader, lr_scheduler
+        )
+    else:
+        unet, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
+            unet, optimizer, train_dataloader,val_dataloader, lr_scheduler
+        )
     
     if args.use_ema:
         ema_unet.to(accelerator.device)
@@ -1465,7 +1546,7 @@ def main():
                         f"Unknown prediction type {noise_scheduler.config.prediction_type}"
                     )
                 
-                model_pred = pipeline_method(unet, batch, args, vae, weight_dtype, bsz, latents, generator, text_encoder, tokenize_captions, accelerator, noisy_latents, timesteps, encoder_hidden_states, feature_extractor, image_encoder, image_normalizer, image_noising_scheduler)
+                model_pred = pipeline_method(unet, batch, args, vae, weight_dtype, bsz, latents, generator, text_encoder, tokenize_captions, accelerator, noisy_latents, timesteps, encoder_hidden_states, feature_extractor, image_encoder, image_normalizer, image_noising_scheduler, latent_qformer)
 
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
@@ -1583,7 +1664,7 @@ def main():
                     with torch.no_grad():
                         for bn in tqdm(range(len(batch['text'][:10])), desc="Generating train images"):
                             
-                            edited_image, original_image = pipeline_eval_method(args, batch, pipeline, generator, bn)
+                            edited_image, original_image = pipeline_eval_method(args, batch, pipeline, generator, bn, latent_qformer)
 
                             h_concat = PIL.Image.new('RGB', (edited_image.width * 3, edited_image.height))
                             h_concat.paste(original_image, (0, 0))
@@ -1607,7 +1688,7 @@ def main():
                         with torch.no_grad():
                             for bn in tqdm(range(len(vbatch['text'][:10])), desc="Generating val images"):
 
-                                edited_image, original_image = pipeline_eval_method(args, vbatch, pipeline, generator, bn)
+                                edited_image, original_image = pipeline_eval_method(args, vbatch, pipeline, generator, bn, latent_qformer)
                                 
                                 h_concat = PIL.Image.new('RGB', (edited_image.width * 3, edited_image.height))
                                 h_concat.paste(original_image, (0, 0))
